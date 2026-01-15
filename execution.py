@@ -1,35 +1,29 @@
+from dataclasses import dataclass
 import networkx as nx
-from executor import GraphState
+from primatives import GraphState, GraphIO
 
-# TODO
-#  Execution is not really a property of the graph because it is something that is the same for every single graph
-#  This means that it needs to be written out as its own set of functions that can be imported
-#  This will allows the graph to simply call the execution function in a global sense
-#  All of the execution logic will still depend on the graphstate class, so that will not be touched
-#  (likely it will be moved to the primitives file after this has been completed)
-#  The question then is if a graph state is a property of a graph at all
-#  Everything about the graph state is a property of the object except for the actual values
-#  -> This could imply that it would make sense for a default graph state object to be a property of the graph
-#
+import torch
+
+# TODO cleanup
+#  also need to address if tracking of state object is working as intended
+#  execution routines seem to produce negative of executor routines?
 
 def execute(graph, inputs) -> GraphState:
-    state = GraphState(graph)
-    state.reset(inputs)
+    graph.state.reset(inputs)
 
     execution_regions = get_execution_regions(graph)
     for execution_region in execution_regions:
         if execution_region.type == "acyclic":
-            execute_acyclic_region(execution_region)
+            execute_acyclic_region(graph, execution_region)
         elif execution_region.type == "cyclic":
-            execute_cyclic_region(execution_region)
+            execute_cyclic_region(graph, execution_region)
         else:
             raise ValueError(f"Execution failed - unsupported execution region type \"{execution_region}\"")
 
-    return self.state
+    return graph.state
 
-def execute_block(self, block_name: str, state=None):
-    state = state if state is not None else self.state
-    block = self.graph.blocks[block_name]
+def execute_block(graph, state, block_name: str):
+    block = graph.blocks[block_name]
     input_dict = {}
 
     for io, value in state:
@@ -39,15 +33,15 @@ def execute_block(self, block_name: str, state=None):
     output_dict = block.compute(input_dict)
     return output_dict
 
-def execute_acyclic_region(self, region):
+def execute_acyclic_region(graph, region):
     for block_name in region.block_names:
-        output_dict = self.execute_block(block_name)
+        output_dict = execute_block(graph, graph.state, block_name)
 
         for output in output_dict:
             output_key = GraphIO(block_name=block_name, block_port=output, io_type="output")
-            self.state[output_key] = output_dict[output]
+            graph.state[output_key] = output_dict[output]
 
-def execute_cyclic_region(self, region):
+def execute_cyclic_region(graph, region):
     class InverseJacobian:
         def __init__(self, alpha: float = 1.0, max_updates: int = None):
             self.alpha = alpha
@@ -72,7 +66,7 @@ def execute_cyclic_region(self, region):
     def _update_state(state):
         new_state = torch.clone(state)
         for block_name in region.block_names:
-            output_dict = self.execute_block(block_name, state)
+            output_dict = execute_block(graph, state, block_name)
 
             for output in output_dict:
                 output_key = GraphIO(block_name=block_name, block_port=output, io_type="output")
@@ -109,8 +103,8 @@ def execute_cyclic_region(self, region):
             x, Fx = x_new, Fx_new
 
     with torch.no_grad():
-        z_state = _broyden_solve(self.state)
-    self.state = z_state
+        z_state = _broyden_solve(graph.state)
+    graph.state = z_state
 
 
 @dataclass

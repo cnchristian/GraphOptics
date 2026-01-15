@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import networkx as nx
 
-from executor import GraphExecutor, GraphIO
+import torch
 from torch import Tensor
 
 TRAINABLE = True
@@ -37,26 +37,101 @@ class Link:
     def __repr__(self):
         return f"{self.src_name}.{self.src_output} → {self.dst_name}.{self.dst_input}"
 
+@dataclass(frozen=True)
+class GraphIO:
+    block_name: str
+    block_port: str
+    io_type: str
+
+# TODO clean this up as much as possible
+class GraphState:
+    def __init__(self, graph):
+        self.graph = graph
+        self.values: list[Tensor] = []
+        self.index: dict[GraphIO, int] = {}
+
+    def __len__(self):
+        return len(self.values)
+
+    def __iter__(self):
+        for io, index in self.index.items():
+            yield io, self.values[index]
+
+    def __contains__(self, key: GraphIO) -> bool:
+        return key in self.index
+
+    def __getitem__(self, key: GraphIO) -> Tensor:
+        return self.values[self.index[key]]
+
+    def __setitem__(self, key: GraphIO, value: Tensor):
+        if key in self.index:
+            self.values[self.index[key]] = value
+        else:
+            if any(value is item for item in self.values):
+                index = next((i for i, item in enumerate(self.values) if item is value), None)
+            else:
+                index = len(self.values)
+                self.values.append(value)
+            self.index[key] = index
+
+    def __add__(self, other): return torch.add(self, other)
+    def __sub__(self, other): return torch.sub(self, other)
+    def __mul__(self, other): return torch.mul(self, other)
+    def __rmul__(self, other): return torch.mul(other, self)
+    def __truediv__(self, other): return torch.div(self, other)
+    def __neg__(self): return torch.neg(self)
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        lengths = {len(arg) for arg in args if isinstance(arg, GraphState)}
+        n = lengths.pop() if lengths else 0
+
+        result = GraphState(self.graph)
+        result.index = self.index.copy()
+
+        for i in range(n):
+            new_args = [arg.values[i] if isinstance(arg, GraphState) else arg for arg in args]
+            result.values.append(func(*new_args, **kwargs))
+
+        return result
+
+    def reset(self, inputs: dict[str, Tensor]):
+        for alias, value in inputs.items():
+            alias_key = self.graph.inputs[alias]
+            self[alias_key] = value
+
+        for block_name, block in self.graph.blocks.items():
+            for output_name in block.output_names:
+                output_key = GraphIO(block_name=block_name, block_port=output_name, io_type="output")
+                value = torch.tensor(0, dtype=torch.complex64)
+                self[output_key] = value
+
+        for link in self.graph.links:
+            output_key = GraphIO(block_name=link.src_name, block_port=link.src_output, io_type="output")
+            input_key = GraphIO(block_name=link.dst_name, block_port=link.dst_input, io_type="input")
+            self[input_key] = self[output_key]
+
+        for block_name, block in self.graph.blocks.items():
+            for input_name in block.input_names:
+                input_key = GraphIO(block_name=block_name, block_port=input_name, io_type="input")
+                if not input_key in self:
+                    value = torch.tensor(0, dtype=torch.complex64)
+                    self[input_key] = value
+
+from execution import execute
 # TODO need to be able to handle moving a graph to the GPU (Currently everything starts on the CPU by default)
-# TODO need to decide how states will be handled (i.e. should they still belong to the graphexecutor or should they be a property of the graph, or something else entirely?)
 class Graph:
     def __init__(self):
         self.blocks: dict[str, Block] = {}
         self.links: list[Link] = []
         self.nx = nx.DiGraph()
+
         self.inputs: dict[str, GraphIO] = {}
         self.outputs: dict[str, GraphIO] = {}
-        self.executor = GraphExecutor(self)
 
-    def __repr__(self):
-        s = "Graph:\n"
-        for name, block in self.blocks:
-            s += f"  Block {name}: inputs={block.input_names}, outputs={block.output_names}\n"
-
-        s += "  Links:\n"
-        for l in self.links:
-            s += f"    {l}\n"
-        return s
+        self.state = GraphState(self)
 
     def add_block(self, name: str, block_type: type):
         if name in self.blocks:
@@ -133,7 +208,7 @@ class Graph:
         if not inputs.keys() == self.inputs.keys():
             raise KeyError("Graph compute failed - incorrect inputs provided")
 
-        computed_state = self.executor.execute(inputs)
+        computed_state = execute(self, inputs)
 
         output_dict = {}
         for alias, output_io in self.outputs.items():
