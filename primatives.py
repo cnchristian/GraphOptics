@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import networkx as nx
 
 import torch
+from torch.nn import Parameter, Module
 from torch import Tensor
 
 TRAINABLE = True
@@ -9,13 +10,13 @@ NOT_TRAINABLE = False
 
 @dataclass
 class BlockParam:
-    value: Tensor
+    value: Parameter
     trainable: bool
 
-    def __torch_function__(self, func, types, args=(), kwargs=None):
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-
         new_args = [arg.value if isinstance(arg, BlockParam) else arg for arg in args]
         return func(*new_args, **kwargs)
 
@@ -43,7 +44,6 @@ class GraphIO:
     block_port: str
     io_type: str
 
-# TODO clean this up as much as possible
 class GraphState:
     def __init__(self, graph):
         self.graph = graph
@@ -81,21 +81,33 @@ class GraphState:
     def __truediv__(self, other): return torch.div(self, other)
     def __neg__(self): return torch.neg(self)
 
-    def __torch_function__(self, func, types, args=(), kwargs=None):
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
 
         lengths = {len(arg) for arg in args if isinstance(arg, GraphState)}
         n = lengths.pop() if lengths else 0
 
-        result = GraphState(self.graph)
-        result.index = self.index.copy()
+        ref = next(arg for arg in args if isinstance(arg, GraphState))
+        result = cls(ref.graph)
+        result.index = ref.index.copy()
 
         for i in range(n):
             new_args = [arg.values[i] if isinstance(arg, GraphState) else arg for arg in args]
             result.values.append(func(*new_args, **kwargs))
 
         return result
+
+    def flatten(self):
+        return tuple(self.values)
+
+    @classmethod
+    def unflatten(cls, graph, flat, index):
+        state = cls(graph)
+        state.values = list(flat)
+        state.index = index.copy()
+        return state
 
     def reset(self, inputs: dict[str, Tensor]):
         for alias, value in inputs.items():
@@ -105,7 +117,7 @@ class GraphState:
         for block_name, block in self.graph.blocks.items():
             for output_name in block.output_names:
                 output_key = GraphIO(block_name=block_name, block_port=output_name, io_type="output")
-                value = torch.tensor(0, dtype=torch.complex64)
+                value = torch.tensor(0, dtype=torch.complex64, requires_grad=True)
                 self[output_key] = value
 
         for link in self.graph.links:
@@ -117,13 +129,15 @@ class GraphState:
             for input_name in block.input_names:
                 input_key = GraphIO(block_name=block_name, block_port=input_name, io_type="input")
                 if not input_key in self:
-                    value = torch.tensor(0, dtype=torch.complex64)
+                    value = torch.tensor(0, dtype=torch.complex64, requires_grad=True)
                     self[input_key] = value
 
 from execution import execute
 # TODO need to be able to handle moving a graph to the GPU (Currently everything starts on the CPU by default)
-class Graph:
+class Graph(Module):
     def __init__(self):
+        super().__init__()
+
         self.blocks: dict[str, Block] = {}
         self.links: list[Link] = []
         self.nx = nx.DiGraph()
@@ -139,8 +153,25 @@ class Graph:
 
         block = block_type()
 
+        input_ports = " | ".join(f"<{i}>{i}" for i in block.input_names)
+        output_ports = " | ".join(f"<{o}>{o}" for o in block.output_names)
+
+        if input_ports and output_ports:
+            label = f"{{ {{ {input_ports} }} | {name} | {{ {output_ports} }} }}"
+        elif input_ports:
+            label = f"{{ {{ {input_ports} }} | {name} }}"
+        elif output_ports:
+            label = f"{{ {name} | {{ {output_ports} }} }}"
+        else:
+            label = name
+
         self.blocks[name] = block
-        self.nx.add_node(name)
+        self.nx.add_node(name, shape="record", label=label)
+
+        block_params = block.params
+        for param_name, data in block_params.items():
+            self.register_parameter(f"{name}-{param_name}", data.value)
+
         return block
 
     def add_link(self, src_name: str, src_output: str,
@@ -156,7 +187,7 @@ class Graph:
 
         link = Link(src_name, src_output, dst_name, dst_input)
         self.links.append(link)
-        self.nx.add_edge(src_name, dst_name)
+        self.nx.add_edge(src_name, dst_name, tailport=src_output, headport=dst_input)
         return link
 
     def write_param(self, name: str, param: str, data: BlockParam):
@@ -169,6 +200,7 @@ class Graph:
             raise KeyError(f"Write param failed - Block \"{name}\" has no parameter \"{param}\"")
 
         block.params[param] = data
+        self.register_parameter(f"{name}-{param}", data.value)
 
     def set_input(self, alias: str, dst_name: str, dst_input: str):
         if alias in self.inputs:
@@ -222,6 +254,9 @@ class SuperBlock(Block):
 
     def __init__(self):
         self.internal_graph = self.generate_internal_graph()
+
+        self.input_names = (*self.input_map.keys(),)
+        self.output_names = (*self.output_map.keys(),)
 
         for alias, (src_name, src_output) in self.output_map.items():
             self.internal_graph.set_output(alias, src_name, src_output)

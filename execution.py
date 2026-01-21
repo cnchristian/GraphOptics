@@ -1,26 +1,8 @@
 from dataclasses import dataclass
-import networkx as nx
 from primatives import GraphState, GraphIO
 
 import torch
-
-# TODO cleanup
-#  also need to address if tracking of state object is working as intended
-#  execution routines seem to produce negative of executor routines?
-
-def execute(graph, inputs) -> GraphState:
-    graph.state.reset(inputs)
-
-    execution_regions = get_execution_regions(graph)
-    for execution_region in execution_regions:
-        if execution_region.type == "acyclic":
-            execute_acyclic_region(graph, execution_region)
-        elif execution_region.type == "cyclic":
-            execute_cyclic_region(graph, execution_region)
-        else:
-            raise ValueError(f"Execution failed - unsupported execution region type \"{execution_region}\"")
-
-    return graph.state
+import networkx as nx
 
 def execute_block(graph, state, block_name: str):
     block = graph.blocks[block_name]
@@ -42,6 +24,76 @@ def execute_acyclic_region(graph, region):
             graph.state[output_key] = output_dict[output]
 
 def execute_cyclic_region(graph, region):
+    flat = graph.state.flatten()
+    flat_out = CyclicRegionDEQ.apply(graph, region, *flat)
+    graph.state = GraphState.unflatten(graph, flat_out, graph.state.index)
+
+
+@dataclass
+class ExecutionRegion:
+    is_cyclic: bool
+    block_names: list
+
+def get_execution_regions(graph) -> list[ExecutionRegion]:
+    scc_graph = nx.DiGraph()
+
+    sccs = list(nx.strongly_connected_components(graph.nx))
+    for i in range(len(sccs)):
+        scc_graph.add_node(i)
+
+    node_to_scc = {}
+    for idx, scc in enumerate(sccs):
+        for node in scc:
+            node_to_scc[node] = idx
+
+    for u, v in graph.nx.edges():
+        scc_u = node_to_scc[u]
+        scc_v = node_to_scc[v]
+        if scc_u != scc_v:                      # TODO does this break actually intentional cycles?
+            scc_graph.add_edge(scc_u, scc_v)
+
+    sorted_scc_ids = list(nx.topological_sort(scc_graph))
+
+    def scc_is_cyclic(scc: set[str]) -> bool:
+        node = next(iter(scc))
+        return len(scc) != 1 or graph.nx.has_edge(node, node)
+
+    regions = []
+    for scc_id in sorted_scc_ids:
+        scc_nodes = list(sccs[scc_id])
+        is_cyclic = scc_is_cyclic(sccs[scc_id])
+        regions.append(ExecutionRegion(is_cyclic=is_cyclic, block_names=sorted(scc_nodes)))
+
+    return regions
+
+def execute(graph, inputs) -> GraphState:
+    graph.state.reset(inputs)
+
+    execution_regions = get_execution_regions(graph)
+    for execution_region in execution_regions:
+        if execution_region.is_cyclic:
+            execute_cyclic_region(graph, execution_region)
+        else:
+            execute_acyclic_region(graph, execution_region)
+
+    return graph.state
+
+def _update_state(graph, state, region):
+    new_state = torch.clone(state)
+    for block_name in region.block_names:
+        output_dict = execute_block(graph, state, block_name)
+
+        for output in output_dict:
+            output_key = GraphIO(block_name=block_name, block_port=output, io_type="output")
+            new_state[output_key] = output_dict[output]
+
+    step = torch.sub(new_state, state)
+    return step
+
+def _broyden_solve(graph, region, tol=1e-5, max_iters=250):
+    def _inner(a: GraphState, b: GraphState) -> torch.Tensor:
+        return sum((torch.sum(torch.conj(a) * b)).values)
+
     class InverseJacobian:
         def __init__(self, alpha: float = 1.0, max_updates: int = None):
             self.alpha = alpha
@@ -60,102 +112,102 @@ def execute_cyclic_region(graph, region):
             if self.max_updates is not None:
                 self.updates = self.updates[-self.max_updates:]
 
-    def _inner(a: GraphState, b: GraphState) -> torch.Tensor:
-        return sum((torch.sum(torch.conj(a) * b)).values)
+    z = torch.clone(graph.state)
+    Fz = _update_state(graph, z, region)
+    H = InverseJacobian(alpha=1.0, max_updates=50)
 
-    def _update_state(state):
-        new_state = torch.clone(state)
+    for k in range(max_iters):
+        res_norm = torch.sqrt(_inner(Fz, Fz).real)
+        if res_norm < tol:
+            return z
+
+        p = torch.neg(H.apply(Fz))
+
+        z_new = z + p
+        Fz_new = _update_state(graph, z_new, region)
+
+        s = p  # z_{k+1} - z_k
+        y = Fz_new - Fz
+        Hy = H.apply(y)
+        denom = _inner(Hy, y)
+
+        if torch.abs(denom) < 1e-12:
+            z, Fz = z_new, Fz_new
+            continue
+
+        H.add_update((s - Hy) / denom, Hy)
+        z, Fz = z_new, Fz_new
+
+    print("Warning -- Broyden did not converge")
+    return z
+
+class CyclicRegionDEQ(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, graph, region, *flat_state):
+        z0 = GraphState.unflatten(graph, flat_state, graph.state.index)
+        with torch.no_grad():
+            z_star = _broyden_solve(graph, region)
+        flat_out = z_star.flatten()
+
+        ctx.graph = graph
+        ctx.region = region
+        ctx.flat_state = flat_state
+
+        return flat_out
+
+    @staticmethod
+    def backward(ctx, *grad_flat):
+        graph = ctx.graph
+        region = ctx.region
+        flat_state = ctx.flat_state
+
+        z0 = GraphState.unflatten(graph, flat_state, graph.state.index)
+        with torch.enable_grad():
+            z_star = _broyden_solve(graph, region)
+            f_z = _update_state(graph, z_star, region)
+
+        grad_z_star = GraphState.unflatten(graph, grad_flat, graph.state.index)
+        for _, v in graph.state:
+            v.requires_grad_(True)
+
+        def Jt_v(v):
+            grads = torch.autograd.grad(
+                outputs=f_z.values,
+                inputs=z_star.values,
+                grad_outputs=v.values,
+                retain_graph=True,
+                allow_unused=False
+            )
+            out = GraphState(graph)
+            out.index = z_star.index.copy()
+            out.values = list(grads)
+            return out
+
+        # Fixed-point solve for implicit gradient
+        v = grad_z_star
+        for _ in range(50):             # TODO this should probably be dynamic to convergence, not hardcoded -- also value just explodes?
+            v = grad_z_star + Jt_v(v)
+
+        # Parameter gradients
+        params = []
         for block_name in region.block_names:
-            output_dict = execute_block(graph, state, block_name)
+            block = graph.blocks[block_name]
+            if hasattr(block, "params"):
+                params.extend(list([param.value for param in block.params.values() if param.trainable]))
 
-            for output in output_dict:
-                output_key = GraphIO(block_name=block_name, block_port=output, io_type="output")
-                new_state[output_key] = output_dict[output]
+        if params:
+            param_grads = torch.autograd.grad(
+                outputs=f_z.values,
+                inputs=params,
+                grad_outputs=v.values,
+                retain_graph=False
+            )
 
-        step = torch.sub(new_state, state)
-        return step
+            for p, g in zip(params, param_grads):
+                if p.grad is None:
+                    p.grad = g
+                else:
+                    p.grad = p.grad + g
 
-    def _broyden_solve(x0: GraphState, tol=1e-5, max_iters=250):
-        x = torch.clone(x0)
-        Fx = _update_state(x)
-        H = InverseJacobian(alpha=1.0, max_updates=50)
-
-        for k in range(max_iters):
-            res_norm = torch.sqrt(_inner(Fx, Fx).real)
-            if res_norm < tol:
-                return x
-
-            p = torch.neg(H.apply(Fx))
-
-            x_new = x + p
-            Fx_new = _update_state(x_new)
-
-            s = p  # z_{k+1} - z_k
-            y = Fx_new - Fx
-            Hy = H.apply(y)
-            denom = _inner(Hy, y)
-
-            if torch.abs(denom) < 1e-12:
-                x, Fx = x_new, Fx_new
-                continue
-
-            H.add_update((s - Hy) / denom, Hy)
-            x, Fx = x_new, Fx_new
-
-    with torch.no_grad():
-        z_state = _broyden_solve(graph.state)
-    graph.state = z_state
-
-
-@dataclass
-class ExecutionRegion:
-    type: str                 # "acyclic", "cyclic"
-    block_names: list         # list of block names (strings)
-
-def get_execution_regions(graph) -> list[ExecutionRegion]:
-    sccs = list(nx.strongly_connected_components(graph.nx))
-
-    # Map each node to its SCC ID
-    node_to_scc = {}
-    for idx, scc in enumerate(sccs):
-        for node in scc:
-            node_to_scc[node] = idx
-
-    # -----------------------------
-    # 2. Build SCC graph (DAG)
-    # -----------------------------
-    scc_graph = nx.DiGraph()
-    for i in range(len(sccs)):
-        scc_graph.add_node(i)
-
-    for u, v in graph.nx.edges():
-        scc_u = node_to_scc[u]
-        scc_v = node_to_scc[v]
-        if scc_u != scc_v:
-            scc_graph.add_edge(scc_u, scc_v)
-
-    # -----------------------------
-    # 3. Topologically sort SCC graph
-    # -----------------------------
-    sorted_scc_ids = list(nx.topological_sort(scc_graph))
-
-    # -----------------------------
-    # 4. Tag SCC types
-    # -----------------------------
-    def classify_scc(scc: set[str]) -> str:
-        node = next(iter(scc))
-        if len(scc) == 1 and not graph.nx.has_edge(node, node):
-            return "acyclic"
-        else:
-            return "cyclic"
-
-    # -----------------------------
-    # 5. Build execution region objects
-    # -----------------------------
-    regions = []
-    for scc_id in sorted_scc_ids:
-        scc_nodes = list(sccs[scc_id])
-        rtype = classify_scc(sccs[scc_id])
-        regions.append(ExecutionRegion(type=rtype, block_names=sorted(scc_nodes)))
-
-    return regions
+        # No gradient w.r.t. graph / region / z0
+        return (None, None, *v.flatten())
