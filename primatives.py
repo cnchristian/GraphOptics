@@ -1,8 +1,10 @@
 from dataclasses import dataclass
+from typing import Iterator
+
 import networkx as nx
 
 import torch
-from torch.nn import Parameter, Module
+from torch.nn import Parameter, Module, ModuleDict
 from torch import Tensor
 
 TRAINABLE = True
@@ -20,10 +22,13 @@ class BlockParam:
         new_args = [arg.value if isinstance(arg, BlockParam) else arg for arg in args]
         return func(*new_args, **kwargs)
 
-class Block:
+class Block(Module):
     input_names: tuple[str] = ()
     output_names: tuple[str] = ()
     params: dict[str, BlockParam] = {}
+
+    def __init__(self):
+        super().__init__()
 
     def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         raise NotImplementedError
@@ -138,7 +143,7 @@ class Graph(Module):
     def __init__(self):
         super().__init__()
 
-        self.blocks: dict[str, Block] = {}
+        self.blocks = ModuleDict()
         self.links: list[Link] = []
         self.nx = nx.DiGraph()
 
@@ -253,6 +258,8 @@ class SuperBlock(Block):
     output_map: dict[str, tuple[str, str]] = {}
 
     def __init__(self):
+        super().__init__()
+
         self.internal_graph = self.generate_internal_graph()
 
         self.input_names = (*self.input_map.keys(),)

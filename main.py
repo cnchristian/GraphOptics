@@ -4,7 +4,6 @@ from controls_blocks import GainBlock, SubtractBlock, SplitBlock, FeedbackSuperB
 
 import torch
 
-
 g = Graph()
 
 g.add_block("feedback", FeedbackSuperBlock)
@@ -14,7 +13,6 @@ g.set_output("sys_out", "feedback", "o")
 
 draw_graph(g, "graph.png")
 
-# TODO this is not recognizing parameters of internal sub-graphs
 optimizer = torch.optim.Adam(g.parameters(), lr=1e-2)
 inp = torch.tensor(1, dtype=torch.complex64)
 target = {"sys_out": torch.tensor(0.33, dtype=torch.complex64)}
