@@ -7,9 +7,13 @@ from torch.nn import Parameter
 class GainBlock(Block):
     input_names = ("i",)
     output_names = ("o",)
-    params = {
-        "factor": BlockParam(Parameter(torch.tensor([1.0 + 0.0j])), TRAINABLE),
-    }
+
+    def __init__(self):
+        super().__init__()
+        self.params = {
+            "factor": BlockParam(Parameter(torch.tensor([1.0 + 0.0j])), TRAINABLE),
+        }
+
     def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         i = inputs["i"]
         factor = self.params["factor"]
@@ -20,7 +24,11 @@ class GainBlock(Block):
 class SubtractBlock(Block):
     input_names = ("a","b",)
     output_names = ("c",)
-    params = {}
+
+    def __init__(self):
+        super().__init__()
+        self.params = {}
+
     def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         a = inputs["a"]
         b = inputs["b"]
@@ -31,7 +39,11 @@ class SubtractBlock(Block):
 class SplitBlock(Block):
     input_names = ("i",)
     output_names = ("a","b")
-    params = {}
+
+    def __init__(self):
+        super().__init__()
+        self.params = {}
+
     def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         i = inputs["i"]
         return {

@@ -90,7 +90,7 @@ def _update_state(graph, state, region):
     step = torch.sub(new_state, state)
     return step
 
-def _broyden_solve(graph, region, tol=1e-5, max_iters=250):
+def _broyden_solve(graph, region, tol=1e-5, max_iters=100):
     def _inner(a: GraphState, b: GraphState) -> torch.Tensor:
         return sum((torch.sum(torch.conj(a) * b)).values)
 
@@ -114,10 +114,16 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=250):
 
     z = torch.clone(graph.state)
     Fz = _update_state(graph, z, region)
+
+    #for i in range(120):
+    #    z += Fz
+    #    Fz = _update_state(graph, z, region)
+
     H = InverseJacobian(alpha=1.0, max_updates=50)
 
     for k in range(max_iters):
         res_norm = torch.sqrt(_inner(Fz, Fz).real)
+        print(f"{k}: {res_norm.numpy()}")
         if res_norm < tol:
             return z
 
@@ -131,11 +137,9 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=250):
         Hy = H.apply(y)
         denom = _inner(Hy, y)
 
-        if torch.abs(denom) < 1e-12:
-            z, Fz = z_new, Fz_new
-            continue
+        if torch.abs(denom) > 1e-12:
+            H.add_update((s - Hy) / denom, Hy)
 
-        H.add_update((s - Hy) / denom, Hy)
         z, Fz = z_new, Fz_new
 
     print("Warning -- Broyden did not converge")

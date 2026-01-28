@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Iterator
 
 import networkx as nx
 
@@ -10,10 +9,17 @@ from torch import Tensor
 TRAINABLE = True
 NOT_TRAINABLE = False
 
-@dataclass
+# TODO trainability types for custom ranges and conditions on blockparam values
+#  ideally this will also change the way blockparams are accessed to avoid the need to always ask for .value
 class BlockParam:
     value: Parameter
     trainable: bool
+
+    def __init__(self, value: Parameter, trainable: bool):
+        self.value = value
+        self.trainable = trainable
+
+        self.value.requires_grad_(trainable)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
@@ -25,10 +31,10 @@ class BlockParam:
 class Block(Module):
     input_names: tuple[str] = ()
     output_names: tuple[str] = ()
-    params: dict[str, BlockParam] = {}
 
     def __init__(self):
         super().__init__()
+        #self.params: dict[str, BlockParam] = {}
 
     def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         raise NotImplementedError
