@@ -99,3 +99,55 @@ class MirrorBlock(Block):
             "o2": i1*torch.sqrt(1-R) + i2*torch.sqrt(R),
         }
 
+class SLMBlock(Block):
+    input_names = ("i", "phase")
+    output_names = ("o",)
+
+    def __init__(self):
+        super().__init__()
+        self.params = {
+            "weights": BlockParam(Parameter(torch.tensor([1.0])), TRAINABLE),
+            "biases": BlockParam(Parameter(torch.tensor([0.0])), TRAINABLE),
+        }
+
+    def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        i = inputs["i"]
+        phase = inputs["phase"]
+        W = self.params["weights"].value
+        B = self.params["biases"].value
+
+        return {
+            "o": i * torch.exp(1j * (W*phase + B)),
+        }
+
+class LensBlock(Block):
+    input_names = ("i",)
+    output_names = ("o",)
+
+    def __init__(self):
+        super().__init__()
+        self.params = {
+            "ds": BlockParam(Parameter(torch.tensor([9.2e-6])), NOT_TRAINABLE),
+            "wavelength": BlockParam(Parameter(torch.tensor([561e-9])), NOT_TRAINABLE),
+            "focal_length": BlockParam(Parameter(torch.tensor([torch.inf])), TRAINABLE),
+        }
+
+    def generate_L(self, focal_length, wavelength, width, height, ds):
+        f_x = torch.fft.fftfreq(width * 2, d=ds)
+        f_y = torch.fft.fftfreq(height * 2, d=ds)
+        F_Y, F_X = torch.meshgrid(f_y, f_x, indexing='ij')
+
+        L = torch.exp(-1j * torch.pi * wavelength * focal_length * (F_X ** 2 + F_Y ** 2))
+
+        return L
+
+    def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        i = inputs["i"]
+        ds = self.params["ds"].value
+        wavelength = self.params["wavelength"].value
+        focal_length = self.params["focal_length"].value
+        height, width = i.shape
+
+        return {
+            "o": i * self.generate_L(focal_length, wavelength, width, height, ds),
+        }

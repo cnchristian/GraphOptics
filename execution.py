@@ -115,10 +115,18 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=100):
     z = torch.clone(graph.state)
     Fz = _update_state(graph, z, region)
 
-    #for i in range(120):
-    #    z += Fz
-    #    Fz = _update_state(graph, z, region)
+    for k in range(max_iters):
+        z += Fz
+        Fz = _update_state(graph, z, region)
 
+        res_norm = torch.sqrt(_inner(Fz, Fz).real)
+        #print(f"{k}: {res_norm.numpy()}")
+        if res_norm < tol:
+            return z
+
+    print("Warning -- Broyden did not converge")
+    return z
+    """
     H = InverseJacobian(alpha=1.0, max_updates=50)
 
     for k in range(max_iters):
@@ -144,7 +152,7 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=100):
 
     print("Warning -- Broyden did not converge")
     return z
-
+    """
 class CyclicRegionDEQ(torch.autograd.Function):
     @staticmethod
     def forward(ctx, graph, region, *flat_state):
