@@ -1,18 +1,35 @@
-from primatives import Block, BlockParam, TRAINABLE, NOT_TRAINABLE
+from primatives import Block, BlockParam, Packet, TRAINABLE, NOT_TRAINABLE
+from image_toolkit import ImagePacket
 
 import torch
-from torch import Tensor
 from torch.nn import Parameter
 
+# ----------------------------------------------------- #
+# ---------------------- Packets ---------------------- #
+# ----------------------------------------------------- #
+
+class FieldPacket(Packet):
+    required_keys = {"height", "width", "ds", "wavelength"}
+
+    def default_value(self):
+        h, w = self.data["height"], self.data["width"]
+        return torch.zeros(h, w, dtype=torch.complex64)
+
+# ----------------------------------------------------- #
+# ---------------------- Blocks ----------------------- #
+# ----------------------------------------------------- #
+
 class PropagationBlock(Block):
-    input_names = ("i",)
-    output_names = ("o",)
+    inputs = {
+        "i": FieldPacket,
+    }
+    outputs = {
+        "o": FieldPacket,
+    }
 
     def __init__(self):
         super().__init__()
         self.params = {
-            "ds": BlockParam(Parameter(torch.tensor([9.2e-6])), NOT_TRAINABLE),
-            "wavelength": BlockParam(Parameter(torch.tensor([561e-9])), NOT_TRAINABLE),
             "distance": BlockParam(Parameter(torch.tensor([1.0])), NOT_TRAINABLE)
         }
 
@@ -62,27 +79,32 @@ class PropagationBlock(Block):
 
         return o[h_half:h_half + H // 2, w_half:w_half + W // 2]
 
-    def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
-        distance = self.params["distance"].value
-        wavelength = self.params["wavelength"].value
-        ds = self.params["ds"].value.item()             # TODO need a better scheme for indicating that ds is fundamentally unlearnable, not just turned off
+        field = i.value
+        height = i["height"].value
+        width = i["width"].value
+        ds = i["ds"].value
+        wavelength = i["wavelength"].value
 
-        if i.ndim > 2:
-            raise ValueError("PropagationBlock compute failed - Inputs must be 2D, 1D, or scalar")
-        i = i.view(1, -1) if i.dim() < 2 else i
-        height, width = i.shape
+        distance = self.params["distance"].value
 
         H = self.generate_H(distance, wavelength, width, height, ds)
         M = self.generate_M(width, height)
 
         return{
-            "o": self.crop(torch.fft.ifft2(H * torch.fft.fft2(self.pad(i))) * M)
+            "o": FieldPacket(reference=i, value=self.crop(torch.fft.ifft2(H * torch.fft.fft2(self.pad(field))) * M))
         }
 
 class MirrorBlock(Block):
-    input_names = ("i1", "i2",)
-    output_names = ("o1", "o2",)
+    inputs = {
+        "i1": FieldPacket,
+        "i2": FieldPacket,
+    }
+    outputs = {
+        "o1": FieldPacket,
+        "o2": FieldPacket,
+    }
 
     def __init__(self):
         super().__init__()
@@ -90,18 +112,30 @@ class MirrorBlock(Block):
             "reflectance": BlockParam(Parameter(torch.tensor([0.5 + 0.0j])), NOT_TRAINABLE)
         }
 
-    def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i1 = inputs["i1"]
         i2 = inputs["i2"]
+
+        if (i1["height"], i1["width"]) != (i2["height"], i2["width"]):
+            raise ValueError("MirrorBlock compute error - incoming fields do not have same shape")
+
+        field1 = i1.value
+        field2 = i2.value
         R = self.params["reflectance"].value
+
         return {
-            "o1": -i1*torch.sqrt(R) + i2*torch.sqrt(1-R),
-            "o2": i1*torch.sqrt(1-R) + i2*torch.sqrt(R),
+            "o1": FieldPacket(reference=field1, value=-field1*torch.sqrt(R) + field2*torch.sqrt(1-R)),
+            "o2": FieldPacket(reference=field2, value=field1*torch.sqrt(1-R) + field2*torch.sqrt(R)),
         }
 
 class SLMBlock(Block):
-    input_names = ("i", "phase")
-    output_names = ("o",)
+    inputs = {
+        "i": FieldPacket,
+        "phase": ImagePacket,
+    }
+    outputs = {
+        "o": FieldPacket,
+    }
 
     def __init__(self):
         super().__init__()
@@ -110,25 +144,39 @@ class SLMBlock(Block):
             "biases": BlockParam(Parameter(torch.tensor([0.0])), TRAINABLE),
         }
 
-    def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+    def refresh(self):
+        h, w = int(self.requirements["h"]), int(self.requirements["w"])
+        self.params = {
+            "weights": BlockParam(Parameter(torch.ones(h, w)), TRAINABLE),
+            "biases": BlockParam(Parameter(torch.zeros(h, w)), TRAINABLE),
+        }
+
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
         phase = inputs["phase"]
+
+        h, w = self.requirements["h"], self.requirements["w"]
+        if not ((i["height"], i["width"]) == (phase["height"], phase["width"]) == (h, w)):
+            raise ValueError(f"SLMBlock compute error - phase array or input does not have required shape ({h}, {w})")
+
         W = self.params["weights"].value
         B = self.params["biases"].value
 
         return {
-            "o": i * torch.exp(1j * (W*phase + B)),
+            "o": FieldPacket(reference=i, value=i * torch.exp(1j * (W*phase + B))),
         }
 
 class LensBlock(Block):
-    input_names = ("i",)
-    output_names = ("o",)
+    inputs = {
+        "i": FieldPacket,
+    }
+    outputs = {
+        "o": FieldPacket,
+    }
 
     def __init__(self):
         super().__init__()
         self.params = {
-            "ds": BlockParam(Parameter(torch.tensor([9.2e-6])), NOT_TRAINABLE),
-            "wavelength": BlockParam(Parameter(torch.tensor([561e-9])), NOT_TRAINABLE),
             "focal_length": BlockParam(Parameter(torch.tensor([torch.inf])), TRAINABLE),
         }
 
@@ -141,13 +189,15 @@ class LensBlock(Block):
 
         return L
 
-    def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
-        ds = self.params["ds"].value
-        wavelength = self.params["wavelength"].value
+        field = i.value
+        height = i["height"].value
+        width = i["width"].value
+        ds = i["ds"].value
+        wavelength = i["wavelength"].value
         focal_length = self.params["focal_length"].value
-        height, width = i.shape
 
         return {
-            "o": i * self.generate_L(focal_length, wavelength, width, height, ds),
+            "o": FieldPacket(reference=i, value=field * self.generate_L(focal_length, wavelength, width, height, ds)),
         }

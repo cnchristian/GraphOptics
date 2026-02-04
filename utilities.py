@@ -7,3 +7,4 @@ def draw_graph(g: Graph, path: str):
     A = to_agraph(g.nx)
     A.layout(prog="dot")
     A.draw(path)
+

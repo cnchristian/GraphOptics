@@ -28,26 +28,61 @@ class BlockParam:
         new_args = [arg.value if isinstance(arg, BlockParam) else arg for arg in args]
         return func(*new_args, **kwargs)
 
+class Packet:
+    required_keys = {}
+    def __init__(self, reference = None, data = None, value = None):
+        if reference is not None and data is None:
+            if type(reference) is not type(self):
+                raise TypeError(f"Create packet failed - incorrect reference type {type(reference)}")
+            self.data = reference.data
+        elif reference is None and data is not None:
+            if data.keys() != self.required_keys:
+                raise KeyError(f"Create packet failed - incorrect parameters provided")
+            self.data = data
+        elif reference is not None and data is not None:
+            raise ValueError(f"{type(self)} creation failed - conflicting reference and parameters")
+        else:
+            raise ValueError(f"{type(self)} creation failed - no information given")
+
+        if value is None:
+            value = self.default_value()
+        self.value = value
+
+    def __getitem__(self, key: str) -> BlockParam:
+        return self.data[key]
+
+    def default_value(self):
+        raise NotImplementedError
+
+    def set_data(self, data: dict[str, BlockParam]):
+        if self.data.keys() != data.keys():
+            raise KeyError("Set packet data failed - incorrect format")
+
+        self.data = data
+
 class Block(Module):
-    input_names: tuple[str] = ()
-    output_names: tuple[str] = ()
+    inputs: dict[str, type] = {}
+    outputs: dict[str, type] = {}
+    requirements: dict[str, Tensor] = {}
 
     def __init__(self):
         super().__init__()
-        #self.params: dict[str, BlockParam] = {}
+        self.input_names = tuple(self.inputs.keys())
+        self.output_names = tuple(self.outputs.keys())
 
-    def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+    def refresh(self):
+        raise NotImplementedError
+
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         raise NotImplementedError
 
 class Link:
-    def __init__(self, src_name, src_output, dst_name, dst_input):
+    def __init__(self, src_name, src_output, dst_name, dst_input, packet_type):
         self.src_name = src_name
         self.src_output = src_output
         self.dst_name = dst_name
         self.dst_input = dst_input
-
-    def __repr__(self):
-        return f"{self.src_name}.{self.src_output} → {self.dst_name}.{self.dst_input}"
+        self.packet_type = packet_type
 
 @dataclass(frozen=True)
 class GraphIO:
@@ -55,6 +90,9 @@ class GraphIO:
     block_port: str
     io_type: str
 
+# TODO
+#  GraphState values should be wrapped as packets
+#  This will enable use of the default constructor and better introspection
 class GraphState:
     def __init__(self, graph):
         self.graph = graph
@@ -189,29 +227,47 @@ class Graph(Module):
                  dst_name: str, dst_input: str):
         if src_name not in self.blocks:
             raise KeyError(f"Add link failed - Block with name \"{src_name}\" does not exist")
-        if src_output not in self.blocks[src_name].output_names:
+        src_block = self.blocks[src_name]
+        if src_output not in src_block.output_names:
             raise ValueError(f"Add link failed - Block \"{src_name}\" does not have output \"{src_output}\"")
+        output_type = src_block.outputs[src_output]
+
         if dst_name not in self.blocks:
             raise KeyError(f"Add link failed - Block with name \"{dst_name}\" does not exist")
-        if dst_input not in self.blocks[dst_name].input_names:
+        dst_block = self.blocks[dst_name]
+        if dst_input not in dst_block.input_names:
             raise ValueError(f"Add link failed - Block \"{dst_name}\" does not have input \"{dst_input}\"")
+        input_type = dst_block.inputs[dst_input]
 
-        link = Link(src_name, src_output, dst_name, dst_input)
+        if not output_type == input_type:
+            raise TypeError("Add link failed - Input and output have different types")
+
+        link = Link(src_name, src_output, dst_name, dst_input, output_type)
         self.links.append(link)
         self.nx.add_edge(src_name, dst_name, tailport=src_output, headport=dst_input)
         return link
 
-    def write_param(self, name: str, param: str, data: BlockParam):
+    def write_params(self, name: str, **params):
         if name not in self.blocks:
-            raise KeyError(f"Write param failed - Block \"{name}\" does not exist")
+            raise KeyError(f"Write params failed - Block \"{name}\" does not exist")
 
         block = self.blocks[name]
 
-        if param not in block.params:
-            raise KeyError(f"Write param failed - Block \"{name}\" has no parameter \"{param}\"")
+        for param, data in params.items():
+            if param not in block.params:
+                raise KeyError(f"Write param failed - Block \"{name}\" has no parameter \"{param}\"")
 
-        block.params[param] = data
-        self.register_parameter(f"{name}-{param}", data.value)
+            block.params[param] = data
+            self.register_parameter(f"{name}-{param}", data.value)
+
+    def write_requirements(self, name: str, **requirements):
+        if name not in self.blocks:
+            raise KeyError(f"Write requirements failed - Block \"{name}\" does not exist")
+
+        block = self.blocks[name]
+
+        block.requirements = requirements
+        block.refresh()
 
     def set_input(self, alias: str, dst_name: str, dst_input: str):
         if alias in self.inputs:
