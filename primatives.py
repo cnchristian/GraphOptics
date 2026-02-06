@@ -1,60 +1,104 @@
+from abc import abstractmethod
 from dataclasses import dataclass
 
 import networkx as nx
 
 import torch
-from torch.nn import Parameter, Module, ModuleDict
 from torch import Tensor
+from torch.nn import Parameter, Module, ModuleDict
 
-TRAINABLE = True
-NOT_TRAINABLE = False
+EMPTY_VALUE = torch.empty(0)
+def is_empty(value: Tensor) -> bool:
+    return value.numel() == 0
 
-# TODO trainability types for custom ranges and conditions on blockparam values
-#  ideally this will also change the way blockparams are accessed to avoid the need to always ask for .value
-class BlockParam:
-    value: Parameter
-    trainable: bool
+class Param:
+    trainability = None
 
-    def __init__(self, value: Parameter, trainable: bool):
-        self.value = value
+    @abstractmethod
+    def __init__(self, value=None):
+        if value is None:
+            value = self.default_val()
+        self._init(value)
+
+    def _init(self, value):
+        self.value = Parameter(value) if self.trainability else value
+
+    def default_val(self):
+        return 0
+
+    def val(self):
+        raise NotImplementedError
+
+class IntParam(Param):
+    trainability = False
+
+    def _init(self, value=None):
+        if not isinstance(value, int):
+            raise TypeError("IntParam create failed - value must be integer")
+        super()._init(value)
+
+    def val(self):
+        return int(self.value)
+
+class TensorParam(Param):
+    trainability = True
+
+    @abstractmethod
+    def _init(self, value=None):
+        super()._init(value)
+        self.trainable = False
+        self.value.requires_grad_(False)
+
+    def val(self):
+        return self.value.item()
+
+    def set_trainable(self, trainable):
         self.trainable = trainable
-
         self.value.requires_grad_(trainable)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-        new_args = [arg.value if isinstance(arg, BlockParam) else arg for arg in args]
+        new_args = [arg.value if isinstance(arg, cls) else arg for arg in args]
         return func(*new_args, **kwargs)
 
+class RealParam(TensorParam):
+    def _init(self, value=None):
+        value = torch.tensor(value, dtype=torch.float32)
+        super()._init(value)
+
+class ComplexParam(TensorParam):
+    def _init(self, value=None):
+        value = torch.tensor(value, dtype=torch.complex64)
+        super()._init(value)
+
 class Packet:
-    required_keys = {}
+    required_params: dict[str, type] = {}
+
+    @abstractmethod
     def __init__(self, reference = None, data = None, value = None):
         if reference is not None and data is None:
             if type(reference) is not type(self):
                 raise TypeError(f"Create packet failed - incorrect reference type {type(reference)}")
             self.data = reference.data
         elif reference is None and data is not None:
-            if data.keys() != self.required_keys:
+            if data.keys() != self.required_params.keys():
                 raise KeyError(f"Create packet failed - incorrect parameters provided")
             self.data = data
         elif reference is not None and data is not None:
             raise ValueError(f"{type(self)} creation failed - conflicting reference and parameters")
         else:
-            raise ValueError(f"{type(self)} creation failed - no information given")
+            self.data = {key: cls() for key, cls in self.required_params.items()}
 
         if value is None:
-            value = self.default_value()
+            value = EMPTY_VALUE
         self.value = value
 
-    def __getitem__(self, key: str) -> BlockParam:
+    def __getitem__(self, key: str) -> Param:
         return self.data[key]
 
-    def default_value(self):
-        raise NotImplementedError
-
-    def set_data(self, data: dict[str, BlockParam]):
+    def set_data(self, data: dict[str, Param]):
         if self.data.keys() != data.keys():
             raise KeyError("Set packet data failed - incorrect format")
 
@@ -65,6 +109,7 @@ class Block(Module):
     outputs: dict[str, type] = {}
     requirements: dict[str, Tensor] = {}
 
+    @abstractmethod
     def __init__(self):
         super().__init__()
         self.input_names = tuple(self.inputs.keys())
@@ -73,6 +118,7 @@ class Block(Module):
     def refresh(self):
         raise NotImplementedError
 
+    # TODO need to come up with a better paradigm for understanding how to handle empty inputs automatically
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         raise NotImplementedError
 
@@ -90,37 +136,34 @@ class GraphIO:
     block_port: str
     io_type: str
 
-# TODO
-#  GraphState values should be wrapped as packets
-#  This will enable use of the default constructor and better introspection
 class GraphState:
     def __init__(self, graph):
         self.graph = graph
-        self.values: list[Tensor] = []
+        self.packets: list[Packet] = []
         self.index: dict[GraphIO, int] = {}
 
     def __len__(self):
-        return len(self.values)
+        return len(self.packets)
 
     def __iter__(self):
         for io, index in self.index.items():
-            yield io, self.values[index]
+            yield io, self.packets[index]
 
     def __contains__(self, key: GraphIO) -> bool:
         return key in self.index
 
-    def __getitem__(self, key: GraphIO) -> Tensor:
-        return self.values[self.index[key]]
+    def __getitem__(self, key: GraphIO) -> Packet:
+        return self.packets[self.index[key]]
 
-    def __setitem__(self, key: GraphIO, value: Tensor):
+    def __setitem__(self, key: GraphIO, packet: Packet):
         if key in self.index:
-            self.values[self.index[key]] = value
+            self.packets[self.index[key]] = packet
         else:
-            if any(value is item for item in self.values):
-                index = next((i for i, item in enumerate(self.values) if item is value), None)
+            if any(packet is item for item in self.packets):
+                index = next((i for i, item in enumerate(self.packets) if item is packet), None)
             else:
-                index = len(self.values)
-                self.values.append(value)
+                index = len(self.packets)
+                self.packets.append(packet)
             self.index[key] = index
 
     def __add__(self, other): return torch.add(self, other)
@@ -142,32 +185,42 @@ class GraphState:
         result = cls(ref.graph)
         result.index = ref.index.copy()
 
+        # TODO this has become so convoluted that I should really just hardcode the few functions that are necessary
         for i in range(n):
-            new_args = [arg.values[i] if isinstance(arg, GraphState) else arg for arg in args]
-            result.values.append(func(*new_args, **kwargs))
+            new_args = [arg.packets[i] if isinstance(arg, GraphState) else arg for arg in args]
+            idx = next((i for i, arg in enumerate(new_args) if not is_empty(arg.value)), 0)
+            if any(not is_empty(a.value) for a in new_args):
+                for a in new_args:
+                    a.value = a.value if not is_empty(a.value) else torch.tensor(0, dtype=torch.complex64)
+            result.packets.append(type(new_args[idx])(reference=new_args[idx], value=func(*[new_arg.value for new_arg in new_args], **kwargs)))
+            for a in new_args:
+                if a.value.numel() == 1 and a.value == torch.tensor([0], dtype=torch.complex64):
+                    a.value = EMPTY_VALUE
 
         return result
 
     def flatten(self):
-        return tuple(self.values)
+        return self.packets, tuple([packet.value for packet in self.packets])
 
     @classmethod
-    def unflatten(cls, graph, flat, index):
+    def unflatten(cls, graph, packets, flat, index):
         state = cls(graph)
-        state.values = list(flat)
+        state.packets = packets.copy()
         state.index = index.copy()
+        for i, packet in enumerate(state.packets):
+            packet.value = flat[i]
         return state
 
-    def reset(self, inputs: dict[str, Tensor]):
-        for alias, value in inputs.items():
+
+    def reset(self, inputs: dict[str, Packet]):
+        for alias, packet in inputs.items():
             alias_key = self.graph.inputs[alias]
-            self[alias_key] = value
+            self[alias_key] = packet
 
         for block_name, block in self.graph.blocks.items():
             for output_name in block.output_names:
                 output_key = GraphIO(block_name=block_name, block_port=output_name, io_type="output")
-                value = torch.tensor(0, dtype=torch.complex64, requires_grad=True)
-                self[output_key] = value
+                self[output_key] = block.outputs[output_name]()
 
         for link in self.graph.links:
             output_key = GraphIO(block_name=link.src_name, block_port=link.src_output, io_type="output")
@@ -178,8 +231,7 @@ class GraphState:
             for input_name in block.input_names:
                 input_key = GraphIO(block_name=block_name, block_port=input_name, io_type="input")
                 if not input_key in self:
-                    value = torch.tensor(0, dtype=torch.complex64, requires_grad=True)
-                    self[input_key] = value
+                    self[input_key] = block.inputs[input_name]()
 
 from execution import execute
 # TODO need to be able to handle moving a graph to the GPU (Currently everything starts on the CPU by default)
@@ -219,7 +271,8 @@ class Graph(Module):
 
         block_params = block.params
         for param_name, data in block_params.items():
-            self.register_parameter(f"{name}-{param_name}", data.value)
+            if data.trainability:
+                self.register_parameter(f"{name}-{param_name}", data.value)
 
         return block
 
@@ -258,7 +311,8 @@ class Graph(Module):
                 raise KeyError(f"Write param failed - Block \"{name}\" has no parameter \"{param}\"")
 
             block.params[param] = data
-            self.register_parameter(f"{name}-{param}", data.value)
+            if data.trainability:
+                self.register_parameter(f"{name}-{param}", data.value)
 
     def write_requirements(self, name: str, **requirements):
         if name not in self.blocks:
@@ -336,5 +390,5 @@ class SuperBlock(Block):
     def generate_internal_graph(self) -> Graph:
         raise NotImplementedError
 
-    def compute(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         return self.internal_graph.compute(**inputs)

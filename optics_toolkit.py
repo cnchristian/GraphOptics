@@ -1,19 +1,19 @@
-from primatives import Block, BlockParam, Packet, TRAINABLE, NOT_TRAINABLE
+from primatives import Block, Packet, RealParam, IntParam, is_empty, EMPTY_VALUE
 from image_toolkit import ImagePacket
 
 import torch
-from torch.nn import Parameter
 
 # ----------------------------------------------------- #
 # ---------------------- Packets ---------------------- #
 # ----------------------------------------------------- #
 
 class FieldPacket(Packet):
-    required_keys = {"height", "width", "ds", "wavelength"}
-
-    def default_value(self):
-        h, w = self.data["height"], self.data["width"]
-        return torch.zeros(h, w, dtype=torch.complex64)
+    required_params = {
+        "height": IntParam,
+        "width": IntParam,
+        "ds": RealParam,
+        "wavelength": RealParam,
+    }
 
 # ----------------------------------------------------- #
 # ---------------------- Blocks ----------------------- #
@@ -30,7 +30,7 @@ class PropagationBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "distance": BlockParam(Parameter(torch.tensor([1.0])), NOT_TRAINABLE)
+            "distance": RealParam(1)
         }
 
     def generate_H(self, distance, wavelength, width, height, ds):
@@ -82,6 +82,10 @@ class PropagationBlock(Block):
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
         field = i.value
+
+        if is_empty(field):
+            return {"o": FieldPacket(reference=i, value=EMPTY_VALUE)}
+
         height = i["height"].value
         width = i["width"].value
         ds = i["ds"].value
@@ -109,23 +113,37 @@ class MirrorBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "reflectance": BlockParam(Parameter(torch.tensor([0.5 + 0.0j])), NOT_TRAINABLE)
+            "reflectance": RealParam(0.5)
         }
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i1 = inputs["i1"]
         i2 = inputs["i2"]
 
-        if (i1["height"], i1["width"]) != (i2["height"], i2["width"]):
-            raise ValueError("MirrorBlock compute error - incoming fields do not have same shape")
+        h1, w1, h2, w2 = i1["height"].val(), i1["width"].val(), i2["height"].val(), i2["width"].val()
 
         field1 = i1.value
         field2 = i2.value
+
+        if is_empty(field1) and is_empty(field2):
+            return {"o1": FieldPacket(reference=i1, value=EMPTY_VALUE),
+                    "o2": FieldPacket(reference=i2, value=EMPTY_VALUE)}
+        elif is_empty(field1):
+            ref = i2
+            field1 = torch.zeros((h2, w2), dtype=torch.complex64)
+        elif is_empty(field2):
+            ref = i1
+            field2 = torch.zeros((h1, w1), dtype=torch.complex64)
+        else:
+            ref = i1
+            if (h1, w1) != (h2, w2):
+                raise ValueError("MirrorBlock compute error - incoming fields do not have same shape")
+
         R = self.params["reflectance"].value
 
         return {
-            "o1": FieldPacket(reference=field1, value=-field1*torch.sqrt(R) + field2*torch.sqrt(1-R)),
-            "o2": FieldPacket(reference=field2, value=field1*torch.sqrt(1-R) + field2*torch.sqrt(R)),
+            "o1": FieldPacket(reference=ref, value=-field1*torch.sqrt(R) + field2*torch.sqrt(1-R)),
+            "o2": FieldPacket(reference=ref, value=field1*torch.sqrt(1-R) + field2*torch.sqrt(R)),
         }
 
 class SLMBlock(Block):
@@ -140,30 +158,38 @@ class SLMBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "weights": BlockParam(Parameter(torch.tensor([1.0])), TRAINABLE),
-            "biases": BlockParam(Parameter(torch.tensor([0.0])), TRAINABLE),
+            "weights": RealParam(1),
+            "biases": RealParam(0),
         }
 
     def refresh(self):
-        h, w = int(self.requirements["h"]), int(self.requirements["w"])
+        h, w = int(self.requirements["height"]), int(self.requirements["width"])
         self.params = {
-            "weights": BlockParam(Parameter(torch.ones(h, w)), TRAINABLE),
-            "biases": BlockParam(Parameter(torch.zeros(h, w)), TRAINABLE),
+            "weights": RealParam(torch.ones(h, w)),
+            "biases": RealParam(torch.zeros(h, w)),
         }
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
+        i_field = i.value
         phase = inputs["phase"]
+        phase_field = phase.value
 
-        h, w = self.requirements["h"], self.requirements["w"]
-        if not ((i["height"], i["width"]) == (phase["height"], phase["width"]) == (h, w)):
+        h, w = int(self.requirements["height"]), int(self.requirements["width"])
+
+        if is_empty(i_field):
+            return {"o": FieldPacket(reference=i, value=EMPTY_VALUE)}
+        elif is_empty(phase_field):
+            phase_field = torch.zeros((h, w), dtype=torch.complex64)
+
+        if not (i_field.shape == phase_field.shape == (h, w)):
             raise ValueError(f"SLMBlock compute error - phase array or input does not have required shape ({h}, {w})")
 
         W = self.params["weights"].value
         B = self.params["biases"].value
 
         return {
-            "o": FieldPacket(reference=i, value=i * torch.exp(1j * (W*phase + B))),
+            "o": FieldPacket(reference=i, value=i_field * torch.exp(1j * (W*phase_field + B))),
         }
 
 class LensBlock(Block):
@@ -177,7 +203,7 @@ class LensBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "focal_length": BlockParam(Parameter(torch.tensor([torch.inf])), TRAINABLE),
+            "focal_length": RealParam(torch.inf),
         }
 
     def generate_L(self, focal_length, wavelength, width, height, ds):
@@ -192,6 +218,10 @@ class LensBlock(Block):
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
         field = i.value
+
+        if is_empty(field):
+            return {"o": FieldPacket(reference=i, value=EMPTY_VALUE)}
+
         height = i["height"].value
         width = i["width"].value
         ds = i["ds"].value

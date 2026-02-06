@@ -1,19 +1,19 @@
-from primatives import Block, BlockParam, Packet, TRAINABLE, NOT_TRAINABLE
+from primatives import Block, Packet, RealParam, ComplexParam, IntParam, EMPTY_VALUE, is_empty
 
 import math
 import torch
-from torch.nn import Parameter
 
 # ----------------------------------------------------- #
 # ---------------------- Packets ---------------------- #
 # ----------------------------------------------------- #
 
 class ImagePacket(Packet):
-    required_keys = {"height", "width", "min", "max"}
-
-    def default_value(self):
-        h, w = self.data["height"], self.data["width"]
-        return torch.ones(h, w, dtype=torch.complex64) * self.data["min"]
+    required_params = {
+        "height": IntParam,
+        "width": IntParam,
+        "min_value": RealParam,
+        "max_value": RealParam,
+    }
 
 # ----------------------------------------------------- #
 # ---------------------- Blocks ----------------------- #
@@ -30,13 +30,17 @@ class RescaleBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "min_value": BlockParam(Parameter(torch.tensor(0)), NOT_TRAINABLE),
-            "max_value": BlockParam(Parameter(torch.tensor(1)), NOT_TRAINABLE),
+            "min_value": RealParam(0),
+            "max_value": RealParam(1),
         }
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
         image = i.value
+
+        if is_empty(image):
+            return {"o": ImagePacket(reference=i, value=EMPTY_VALUE)}
+
         min_input = i["min_value"].value
         max_input = i["max_value"].value
         min_output = self.params["min_value"].value
@@ -59,14 +63,17 @@ class PadBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "padding": BlockParam(Parameter(torch.tensor(0)), NOT_TRAINABLE),
-            "padded_width": BlockParam(Parameter(torch.tensor(100)), NOT_TRAINABLE),
-            "padded_height": BlockParam(Parameter(torch.tensor(100)), NOT_TRAINABLE),
+            "padding": ComplexParam(0),
+            "padded_width": IntParam(0),
+            "padded_height": IntParam(0),
         }
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
         image = i.value
+
+        if is_empty(image):
+            return {"o": ImagePacket(reference=i, value=EMPTY_VALUE)}
 
         width_input = i["width"].value
         height_input = i["height"].value
@@ -77,7 +84,7 @@ class PadBlock(Block):
             raise ValueError("PadBlock compute failed - negative padding requested")
 
         pad_top = math.ceil((height_output - height_input) / 2)
-        pad_bottom = math.floor((width_output - width_input) / 2)
+        pad_bottom = math.floor((height_output - height_input) / 2)
         pad_left = math.ceil((width_output - width_input) / 2)
         pad_right = math.floor((width_output - width_input) / 2)
         padding = (pad_left, pad_right, pad_top, pad_bottom)
@@ -97,13 +104,16 @@ class CropBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "cropped_width": BlockParam(Parameter(torch.tensor(100)), NOT_TRAINABLE),
-            "cropped_height": BlockParam(Parameter(torch.tensor(100)), NOT_TRAINABLE),
+            "cropped_width": IntParam(100),
+            "cropped_height": IntParam(100),
         }
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
         image = i.value
+
+        if is_empty(image):
+            return {"o": ImagePacket(reference=i, value=EMPTY_VALUE)}
 
         width_input = i["width"].value
         height_input = i["height"].value
@@ -134,13 +144,16 @@ class TessellateBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "total_width": BlockParam(Parameter(torch.tensor(100)), NOT_TRAINABLE),
-            "total_height": BlockParam(Parameter(torch.tensor(100)), NOT_TRAINABLE),
+            "total_width": IntParam(100),
+            "total_height": IntParam(100),
         }
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
         image = i.value
+
+        if is_empty(image):
+            return {"o": ImagePacket(reference=i, value=EMPTY_VALUE)}
 
         width_input = i["width"].value
         height_input = i["height"].value
@@ -175,13 +188,16 @@ class FragmentBlock(Block):
     def __init__(self):
         super().__init__()
         self.params = {
-            "individual_width": BlockParam(Parameter(torch.tensor(100)), NOT_TRAINABLE),
-            "individual_height": BlockParam(Parameter(torch.tensor(100)), NOT_TRAINABLE),
+            "individual_width": IntParam(100),
+            "individual_height": IntParam(100),
         }
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
         image = i.value
+
+        if is_empty(image):
+            return {"o": ImagePacket(reference=i, value=EMPTY_VALUE)}
 
         width_input = i["width"].value
         height_input = i["height"].value

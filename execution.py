@@ -1,10 +1,11 @@
 from dataclasses import dataclass
-from primatives import GraphState, GraphIO
+
+from primatives import GraphState, GraphIO, Packet
 
 import torch
 import networkx as nx
 
-def execute_block(graph, state, block_name: str):
+def execute_block(graph, state, block_name: str) -> dict[str, Packet]:
     block = graph.blocks[block_name]
     input_dict = {}
 
@@ -24,9 +25,9 @@ def execute_acyclic_region(graph, region):
             graph.state[output_key] = output_dict[output]
 
 def execute_cyclic_region(graph, region):
-    flat = graph.state.flatten()
-    flat_out = CyclicRegionDEQ.apply(graph, region, *flat)
-    graph.state = GraphState.unflatten(graph, flat_out, graph.state.index)
+    packets, flat = graph.state.flatten()
+    flat_out = CyclicRegionDEQ.apply(graph, region, packets, *flat)
+    graph.state = GraphState.unflatten(graph, packets, flat_out, graph.state.index)
 
 
 @dataclass
@@ -78,6 +79,7 @@ def execute(graph, inputs) -> GraphState:
 
     return graph.state
 
+
 def _update_state(graph, state, region):
     new_state = torch.clone(state)
     for block_name in region.block_names:
@@ -92,7 +94,7 @@ def _update_state(graph, state, region):
 
 def _broyden_solve(graph, region, tol=1e-5, max_iters=100):
     def _inner(a: GraphState, b: GraphState) -> torch.Tensor:
-        return sum((torch.sum(torch.conj(a) * b)).values)
+        return sum([packet.value for packet in (torch.sum(torch.conj(a) * b)).packets])
 
     class InverseJacobian:
         def __init__(self, alpha: float = 1.0, max_updates: int = None):
@@ -155,14 +157,15 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=100):
     """
 class CyclicRegionDEQ(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, graph, region, *flat_state):
-        z0 = GraphState.unflatten(graph, flat_state, graph.state.index)
+    def forward(ctx, graph, region, packets, *flat_state):
+        z0 = GraphState.unflatten(graph, packets, flat_state, graph.state.index)
         with torch.no_grad():
             z_star = _broyden_solve(graph, region)
-        flat_out = z_star.flatten()
+        packets, flat_out = z_star.flatten()
 
         ctx.graph = graph
         ctx.region = region
+        ctx.packets = packets
         ctx.flat_state = flat_state
 
         return flat_out
@@ -171,14 +174,15 @@ class CyclicRegionDEQ(torch.autograd.Function):
     def backward(ctx, *grad_flat):
         graph = ctx.graph
         region = ctx.region
+        packets = ctx.packets
         flat_state = ctx.flat_state
 
-        z0 = GraphState.unflatten(graph, flat_state, graph.state.index)
+        z0 = GraphState.unflatten(graph, packets, flat_state, graph.state.index)
         with torch.enable_grad():
             z_star = _broyden_solve(graph, region)
             f_z = _update_state(graph, z_star, region)
 
-        grad_z_star = GraphState.unflatten(graph, grad_flat, graph.state.index)
+        grad_z_star = GraphState.unflatten(graph, packets, grad_flat, graph.state.index)
         for _, v in graph.state:
             v.requires_grad_(True)
 
@@ -222,4 +226,4 @@ class CyclicRegionDEQ(torch.autograd.Function):
                     p.grad = p.grad + g
 
         # No gradient w.r.t. graph / region / z0
-        return (None, None, *v.flatten())
+        return (None, None, *(v.flatten()[1]))
