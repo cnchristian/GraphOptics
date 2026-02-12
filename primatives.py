@@ -211,7 +211,6 @@ class GraphState:
             packet.value = flat[i]
         return state
 
-
     def reset(self, inputs: dict[str, Packet]):
         for alias, packet in inputs.items():
             alias_key = self.graph.inputs[alias]

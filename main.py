@@ -59,8 +59,8 @@ phase_image_data = {
     "max_value": RealParam(2 * np.pi),
 }
 phase_image = torch.zeros((phase_image_data["height"].val(), phase_image_data["width"].val()), dtype=torch.complex64)
-phase_image[250:300, 250:300] = torch.pi
-phase_image[300:350, 300:350] = torch.pi
+phase_image[150:300, 150:300] = torch.pi
+phase_image[300:450, 300:450] = torch.pi
 phase_packet = ImagePacket(data=phase_image_data, value=phase_image)
 
 out = g.compute(input_field=input_packet, phase_img=phase_packet)

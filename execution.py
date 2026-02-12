@@ -92,9 +92,24 @@ def _update_state(graph, state, region):
     step = torch.sub(new_state, state)
     return step
 
-def _broyden_solve(graph, region, tol=1e-5, max_iters=100):
+def _broyden_solve(graph, region, tol=1e-5, max_iters=500):
     def _inner(a: GraphState, b: GraphState) -> torch.Tensor:
         return sum([packet.value for packet in (torch.sum(torch.conj(a) * b)).packets])
+
+    def _avg_change(Fz: GraphState, z: GraphState) -> torch.Tensor:
+        total = 0
+        for (_, f_packet), (_, z_packet) in zip(Fz, z):
+            f = f_packet.value
+            base = z_packet.value
+            if base.numel() == 0:
+                base = torch.zeros_like(f)
+            ratio = f / base
+
+            zero_zero_mask = (base == 0) & (f == 0)
+            mean_ratio = torch.mean(torch.where(zero_zero_mask, torch.zeros_like(ratio), ratio))
+            total += mean_ratio
+
+        return torch.abs(total / len(z.packets))
 
     class InverseJacobian:
         def __init__(self, alpha: float = 1.0, max_updates: int = None):
@@ -121,9 +136,9 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=100):
         z += Fz
         Fz = _update_state(graph, z, region)
 
-        res_norm = torch.sqrt(_inner(Fz, Fz).real)
-        #print(f"{k}: {res_norm.numpy()}")
-        if res_norm < tol:
+        avg_change = _avg_change(Fz, z)
+        print(f"{k}: {avg_change.numpy()}")
+        if avg_change < tol:
             return z
 
     print("Warning -- Broyden did not converge")
