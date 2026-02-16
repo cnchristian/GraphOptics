@@ -50,7 +50,7 @@ class TensorParam(Param):
         self.value.requires_grad_(False)
 
     def val(self):
-        return self.value.item()
+        return self.value
 
     def set_trainable(self, trainable):
         self.trainable = trainable
@@ -377,14 +377,22 @@ class SuperBlock(Block):
 
         self.internal_graph = self.generate_internal_graph()
 
-        self.input_names = (*self.input_map.keys(),)
-        self.output_names = (*self.output_map.keys(),)
-
+        self.outputs: dict[str, type] = {}
         for alias, (src_name, src_output) in self.output_map.items():
+            self.outputs[alias] = self.internal_graph.blocks[src_name].outputs[src_output]
+
             self.internal_graph.set_output(alias, src_name, src_output)
 
+        self.inputs: dict[str, type] = {}
         for alias, (dst_name, dst_input) in self.input_map.items():
+            self.inputs[alias] = self.internal_graph.blocks[dst_name].inputs[dst_input]
             self.internal_graph.set_input(alias, dst_name, dst_input)
+
+        self.input_names = tuple(self.inputs.keys())
+        self.output_names = tuple(self.outputs.keys())
+
+    def refresh(self):
+        self.internal_graph = self.generate_internal_graph()
 
     def generate_internal_graph(self) -> Graph:
         raise NotImplementedError

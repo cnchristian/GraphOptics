@@ -92,13 +92,17 @@ def _update_state(graph, state, region):
     step = torch.sub(new_state, state)
     return step
 
-def _broyden_solve(graph, region, tol=1e-5, max_iters=500):
+def _broyden_solve(graph, region, tol=1e-5, max_iters=2000):
     def _inner(a: GraphState, b: GraphState) -> torch.Tensor:
         return sum([packet.value for packet in (torch.sum(torch.conj(a) * b)).packets])
 
-    def _avg_change(Fz: GraphState, z: GraphState) -> torch.Tensor:
+    # TODO needs to stop double counting packets because of multiple indices mapping to same key
+    def _avg_change(region: ExecutionRegion, Fz: GraphState, z: GraphState) -> torch.Tensor:
         total = 0
-        for (_, f_packet), (_, z_packet) in zip(Fz, z):
+        for (k1, f_packet), (k2, z_packet) in zip(Fz, z):
+            if not (k1.block_name in region.block_names and k2.block_name in region.block_names):
+                continue
+
             f = f_packet.value
             base = z_packet.value
             if base.numel() == 0:
@@ -136,7 +140,7 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=500):
         z += Fz
         Fz = _update_state(graph, z, region)
 
-        avg_change = _avg_change(Fz, z)
+        avg_change = _avg_change(region, Fz, z)
         print(f"{k}: {avg_change.numpy()}")
         if avg_change < tol:
             return z
@@ -177,6 +181,10 @@ class CyclicRegionDEQ(torch.autograd.Function):
         with torch.no_grad():
             z_star = _broyden_solve(graph, region)
         packets, flat_out = z_star.flatten()
+
+        # TODO need to verify that this does not break differentiation
+        for new_packet, old_packet in zip(packets, graph.state.packets):
+            old_packet.data = new_packet.data
 
         ctx.graph = graph
         ctx.region = region

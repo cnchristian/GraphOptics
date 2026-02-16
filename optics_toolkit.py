@@ -1,5 +1,5 @@
-from primatives import Block, Packet, RealParam, IntParam, is_empty, EMPTY_VALUE
-from image_toolkit import ImagePacket
+from primatives import Block, Packet, RealParam, IntParam, is_empty, EMPTY_VALUE, SuperBlock, Graph
+from image_toolkit import ImagePacket, CropBlock, ScaleBlock
 
 import torch
 
@@ -154,19 +154,24 @@ class SLMBlock(Block):
     outputs = {
         "o": FieldPacket,
     }
+    # TODO need to have the requirements written here somehow
+    #  and some check to make sure the user has specified them before computing
 
     def __init__(self):
         super().__init__()
         self.params = {
             "weights": RealParam(1),
             "biases": RealParam(0),
+            "undiffracted": RealParam(0.5)
         }
 
     def refresh(self):
         h, w = int(self.requirements["height"]), int(self.requirements["width"])
+        # TODO need to adjust this so that I dont have to rewrite undiffracted
         self.params = {
             "weights": RealParam(torch.ones(h, w)),
             "biases": RealParam(torch.zeros(h, w)),
+            "undiffracted": RealParam(self.params["undiffracted"].val())
         }
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
@@ -187,9 +192,10 @@ class SLMBlock(Block):
 
         W = self.params["weights"].value
         B = self.params["biases"].value
+        u = self.params["undiffracted"].value
 
         return {
-            "o": FieldPacket(reference=i, value=i_field * torch.exp(1j * (W*phase_field + B))),
+            "o": FieldPacket(reference=i, value=u*i_field + (1-u)*(i_field * torch.exp(1j * (W*phase_field + B)))),
         }
 
 class LensBlock(Block):
@@ -207,11 +213,11 @@ class LensBlock(Block):
         }
 
     def generate_L(self, focal_length, wavelength, width, height, ds):
-        f_x = torch.fft.fftfreq(width * 2, d=ds)
-        f_y = torch.fft.fftfreq(height * 2, d=ds)
-        F_Y, F_X = torch.meshgrid(f_y, f_x, indexing='ij')
+        x = (torch.arange(width) - width // 2) * ds
+        y = (torch.arange(height) - height // 2) * ds
+        Y, X = torch.meshgrid(y, x, indexing='ij')
 
-        L = torch.exp(-1j * torch.pi * wavelength * focal_length * (F_X ** 2 + F_Y ** 2))
+        L = torch.exp(-1j * torch.pi / (wavelength * focal_length) * (X ** 2 + Y ** 2))
 
         return L
 
@@ -231,3 +237,76 @@ class LensBlock(Block):
         return {
             "o": FieldPacket(reference=i, value=field * self.generate_L(focal_length, wavelength, width, height, ds)),
         }
+
+class DetectorBlock(Block):
+    inputs = {
+        "i": FieldPacket,
+    }
+    outputs = {
+        "o": ImagePacket,
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.params = {
+            "max_value": IntParam(255)
+        }
+
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
+        i = inputs["i"]
+        field = i.value
+        max_value = self.params["max_value"]
+
+        if is_empty(field):
+            return {"o": FieldPacket(reference=i, value=EMPTY_VALUE)}
+
+        data = {
+            "height": i["height"],
+            "width": i["width"],
+            "min_value": IntParam(0),
+            "max_value": max_value,
+        }
+        raw_o = torch.pow(torch.abs(field), 2)
+
+        return {
+            "o": ImagePacket(data=data, value=raw_o/torch.max(raw_o)*max_value.value),
+        }
+
+class CameraBlock(SuperBlock):
+    input_map = {
+        "i": ("detector", "i"),
+    }
+    output_map = {
+        "o": ("crop", "o"),
+    }
+
+    def __init__(self):
+        self.params = {
+            "camera_width": IntParam(1440),
+            "camera_height": IntParam(1080),
+            "camera_ds": RealParam(3.45e-6)
+        }
+        super().__init__()
+
+    def generate_internal_graph(self) -> Graph:
+        g = Graph()
+
+        g.add_block("detector", DetectorBlock)
+        g.add_block("scale", ScaleBlock)
+        g.add_block("crop", CropBlock)
+
+        g.add_link("detector", "o", "scale", "i")
+        g.add_link("scale", "o", "crop", "i")
+
+        return g
+
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
+        i = inputs["i"]
+        i_ds = i["ds"].value
+        c_ds = self.params["camera_ds"].value
+
+        scale = RealParam(float(i_ds/c_ds))
+        self.internal_graph.write_params("scale", scale_factor=scale)
+        self.internal_graph.write_params("crop", cropped_width=self.params["camera_width"], cropped_height=self.params["camera_height"])
+
+        return super().compute(inputs)

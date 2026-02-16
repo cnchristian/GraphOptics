@@ -2,6 +2,7 @@ from primatives import Block, Packet, RealParam, ComplexParam, IntParam, EMPTY_V
 
 import math
 import torch
+import torch.nn.functional as F
 
 # ----------------------------------------------------- #
 # ---------------------- Packets ---------------------- #
@@ -19,7 +20,7 @@ class ImagePacket(Packet):
 # ---------------------- Blocks ----------------------- #
 # ----------------------------------------------------- #
 
-class RescaleBlock(Block):
+class ValueScaleBlock(Block):
     inputs = {
         "i": ImagePacket,
     }
@@ -233,4 +234,38 @@ class FragmentBlock(Block):
 
         return {
             "o": ImagePacket(reference=i, value=averaged)
+        }
+
+class ScaleBlock(Block):
+    inputs = {
+        "i": ImagePacket,
+    }
+    outputs = {
+        "o": ImagePacket,
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.params = {
+            "scale_factor": RealParam(1),
+        }
+
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
+        i = inputs["i"]
+        image = i.value
+
+        if is_empty(image):
+            return {"o": ImagePacket(reference=i, value=EMPTY_VALUE)}
+
+        scale = float(self.params["scale_factor"].value)
+
+        data = {
+            "height": IntParam(math.floor(i["height"].value * scale)),
+            "width": IntParam(math.floor(i["width"].value * scale)),
+            "min_value": i["min_value"],
+            "max_value": i["max_value"],
+        }
+
+        return {
+            "o": ImagePacket(data=data, value=F.interpolate(image.unsqueeze(0).unsqueeze(0), scale_factor=scale, mode='bilinear', align_corners=False).squeeze(0).squeeze(0))
         }
