@@ -119,8 +119,11 @@ class Block(Module):
         raise NotImplementedError
 
     # TODO need to come up with a better paradigm for understanding how to handle empty inputs automatically
+    #  compute function that objects override should be wrapped with empty value processing
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         raise NotImplementedError
+
+# TODO maybe should add a FixedBlock type that will be known to have requirements and automatically handle refreshing and knowing if requirements are unpopulated
 
 class Link:
     def __init__(self, src_name, src_output, dst_name, dst_input, packet_type):
@@ -234,6 +237,7 @@ class GraphState:
 
 from execution import execute
 # TODO need to be able to handle moving a graph to the GPU (Currently everything starts on the CPU by default)
+#  Graph should have device parameter that all tensors are created on and should have set device routine that changes all current and future tensor locations
 class Graph(Module):
     def __init__(self):
         super().__init__()

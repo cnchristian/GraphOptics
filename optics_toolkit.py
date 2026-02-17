@@ -310,3 +310,115 @@ class CameraBlock(SuperBlock):
         self.internal_graph.write_params("crop", cropped_width=self.params["camera_width"], cropped_height=self.params["camera_height"])
 
         return super().compute(inputs)
+
+class FourFBlock(Block):
+    inputs = {
+        "i": FieldPacket,
+    }
+    outputs = {
+        "o": FieldPacket,
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.params = {
+            "f1": RealParam(1),
+            "f2": RealParam(1),
+            "mask": RealParam(1),
+        }
+
+    def refresh(self):
+        h, w = int(self.requirements["height"]), int(self.requirements["width"])
+        self.params = {
+            "f1": RealParam(1),
+            "f2": RealParam(1),
+            "mask": RealParam(torch.ones(h, w)),
+        }
+
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
+        i = inputs["i"]
+        field_I = i.value
+
+        if is_empty(field_I):
+            return {"o": FieldPacket(reference=i, value=EMPTY_VALUE)}
+
+        f1 = self.params["f1"].value
+        f2 = self.params["f2"].value
+        mask = self.params["mask"].value
+
+        field_F = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(field_I), norm="ortho"))
+        field_M = field_F * mask
+        field_O = torch.fft.fftshift(torch.fft.ifft2(torch.fft.ifftshift(field_M), norm="ortho"))
+
+        data = {
+            "height": i["height"],
+            "width": i["width"],
+            "ds": RealParam(i["ds"].value * f2 / f1),
+            "wavelength": i["wavelength"],
+        }
+
+        return {
+            "o": FieldPacket(data=data, value=field_O),
+        }
+
+# TODO Finish this
+class ASMFourFBlock(SuperBlock):
+    input_map = {
+        "i": ("detector", "i"),
+    }
+    output_map = {
+        "o": ("crop", "o"),
+    }
+
+    def __init__(self):
+        self.params = {
+            "camera_width": IntParam(1440),
+            "camera_height": IntParam(1080),
+            "camera_ds": RealParam(3.45e-6)
+        }
+        super().__init__()
+
+    def generate_internal_graph(self) -> Graph:
+        g = Graph()
+
+        g.add_block("detector", DetectorBlock)
+        g.add_block("scale", ScaleBlock)
+        g.add_block("crop", CropBlock)
+
+        g.add_link("detector", "o", "scale", "i")
+        g.add_link("scale", "o", "crop", "i")
+
+        # g.add_block("L1", LensBlock)
+        # g.add_block("L1_prop_1_forward", PropagationBlock)
+        # g.add_block("L1_prop_2_forward", PropagationBlock)
+        # g.write_params("L1_prop_1_forward", distance=l1_focal_length)
+        # g.write_params("L1", focal_length=l1_focal_length)
+        # g.write_params("L1_prop_2_forward", distance=l1_focal_length)
+
+        # g.add_block("L2", LensBlock)
+        # g.add_block("L2_prop_1_forward", PropagationBlock)
+        # g.add_block("L2_prop_2_forward", PropagationBlock)
+        # g.write_params("L2_prop_1_forward", distance=l2_focal_length)
+        # g.write_params("L2", focal_length=l2_focal_length)
+        # g.write_params("L2_prop_2_forward", distance=l2_focal_length)
+
+        # g.add_link("mirror", "o1", "L1_prop_1_forward", "i")
+        # g.add_link("L1_prop_1_forward", "o", "L1", "i")
+        # g.add_link("L1", "o", "L1_prop_2_forward", "i")
+        # g.add_link("L1_prop_2_forward", "o", "L2_prop_1_forward", "i")
+        # g.add_link("L2_prop_1_forward", "o", "L2", "i")
+        # g.add_link("L2", "o", "L2_prop_2_forward", "i")
+
+        return g
+
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
+        i = inputs["i"]
+        i_ds = i["ds"].value
+        c_ds = self.params["camera_ds"].value
+
+        scale = RealParam(float(i_ds / c_ds))
+        self.internal_graph.write_params("scale", scale_factor=scale)
+        self.internal_graph.write_params("crop", cropped_width=self.params["camera_width"],
+                                         cropped_height=self.params["camera_height"])
+
+        return super().compute(inputs)

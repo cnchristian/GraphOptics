@@ -1,6 +1,6 @@
 from primatives import RealParam, Graph, IntParam
 from utilities import draw_graph
-from optics_toolkit import PropagationBlock, MirrorBlock, SLMBlock, FieldPacket, LensBlock, CameraBlock
+from optics_toolkit import PropagationBlock, MirrorBlock, SLMBlock, FieldPacket, CameraBlock, FourFBlock
 from image_toolkit import PadBlock, ImagePacket
 
 import torch
@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 upscaling = 4
 
-mirror_reflectance = RealParam(0.5)
+mirror_reflectance = RealParam(0)
 prop_dist = RealParam(2.5e-3)
 slm_width = IntParam(1920*upscaling)
 slm_height = IntParam(1152*upscaling)
@@ -18,9 +18,10 @@ slm_undiffracted = RealParam(0.05)
 beam_splitter_ratio = RealParam(0.5)
 l1_focal_length = RealParam(100e-3)
 l2_focal_length = RealParam(35e-3)
+mask = RealParam(torch.ones(slm_height.value, slm_width.value))
 
-camera_width = IntParam(1440)
-camera_height = IntParam(1080)
+camera_width = IntParam(720)
+camera_height = IntParam(540)
 camera_ds = RealParam(3.45e-6)
 
 g = Graph()
@@ -45,30 +46,14 @@ g.add_link("slm", "o", "backward_propagation", "i")
 g.add_link("backward_propagation", "o", "mirror", "i2")
 
 # Imaging Arm
-g.add_block("L1", LensBlock)
-g.add_block("L1_prop_1_forward", PropagationBlock)
-g.add_block("L1_prop_2_forward", PropagationBlock)
-g.write_params("L1_prop_1_forward", distance=l1_focal_length)
-g.write_params("L1", focal_length=l1_focal_length)
-g.write_params("L1_prop_2_forward", distance=l1_focal_length)
-
-g.add_block("L2", LensBlock)
-g.add_block("L2_prop_1_forward", PropagationBlock)
-g.add_block("L2_prop_2_forward", PropagationBlock)
-g.write_params("L2_prop_1_forward", distance=l2_focal_length)
-g.write_params("L2", focal_length=l2_focal_length)
-g.write_params("L2_prop_2_forward", distance=l2_focal_length)
-
-g.add_link("mirror", "o1", "L1_prop_1_forward", "i")
-g.add_link("L1_prop_1_forward", "o", "L1", "i")
-g.add_link("L1", "o", "L1_prop_2_forward", "i")
-g.add_link("L1_prop_2_forward", "o", "L2_prop_1_forward", "i")
-g.add_link("L2_prop_1_forward", "o", "L2", "i")
-g.add_link("L2", "o", "L2_prop_2_forward", "i")
+g.add_block("4F", FourFBlock)
+g.write_requirements("4F", width=slm_width.value, height=slm_height.value)
+g.write_params("4F", f1=l1_focal_length, f2=l2_focal_length, mask=mask)
+g.add_link("mirror", "o1", "4F", "i")
 
 g.add_block("camera", CameraBlock)
 g.write_params("camera", camera_width=camera_width, camera_height=camera_height, camera_ds=camera_ds)
-g.add_link("L2_prop_2_forward", "o", "camera", "i")
+g.add_link("4F", "o", "camera", "i")
 
 # Phase Encoding
 g.add_block("input_to_slm", PadBlock)
@@ -79,7 +64,7 @@ g.add_link("input_to_slm", "o", "slm", "phase")
 # IO Configuration
 g.set_input("input_field", "mirror", "i1")
 g.set_input("phase_img", "input_to_slm", "i")
-g.set_output("output_field", "mirror", "o1")
+g.set_output("output_field", "camera", "o")
 
 input_field_data = {
     "height": slm_height,
