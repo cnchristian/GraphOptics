@@ -97,6 +97,7 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=2000):
         return sum([packet.value for packet in (torch.sum(torch.conj(a) * b)).packets])
 
     # TODO needs to stop double counting packets because of multiple indices mapping to same key
+    # TODO needs to give maximum across batch instead of just averaging across batch
     def _avg_change(region: ExecutionRegion, Fz: GraphState, z: GraphState) -> torch.Tensor:
         total = 0
         for (k1, f_packet), (k2, z_packet) in zip(Fz, z):
@@ -110,8 +111,8 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=2000):
             ratio = f / base
 
             zero_zero_mask = (base == 0) & (f == 0)
-            mean_ratio = torch.mean(torch.where(zero_zero_mask, torch.zeros_like(ratio), ratio))
-            total += mean_ratio
+            max_mean_ratio = torch.max(torch.abs(torch.mean(torch.where(zero_zero_mask, torch.zeros_like(ratio), ratio), dim=tuple(range(1, ratio.ndim)))))
+            total += max_mean_ratio
 
         return torch.abs(total / len(z.packets))
 

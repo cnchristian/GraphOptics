@@ -14,14 +14,14 @@ def is_empty(value: Tensor) -> bool:
 class Param:
     trainability = None
 
-    @abstractmethod
     def __init__(self, value=None):
         if value is None:
             value = self.default_val()
         self._init(value)
 
+    @abstractmethod
     def _init(self, value):
-        self.value = Parameter(value) if self.trainability else value
+        self._value = Parameter(value) if self.trainability else value
 
     def default_val(self):
         return 0
@@ -38,7 +38,7 @@ class IntParam(Param):
         super()._init(value)
 
     def val(self):
-        return int(self.value)
+        return int(self._value)
 
 class TensorParam(Param):
     trainability = True
@@ -47,20 +47,20 @@ class TensorParam(Param):
     def _init(self, value=None):
         super()._init(value)
         self.trainable = False
-        self.value.requires_grad_(False)
+        self._value.requires_grad_(False)
 
     def val(self):
-        return self.value
+        return self._value
 
     def set_trainable(self, trainable):
         self.trainable = trainable
-        self.value.requires_grad_(trainable)
+        self._value.requires_grad_(trainable)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-        new_args = [arg.value if isinstance(arg, cls) else arg for arg in args]
+        new_args = [arg._value if isinstance(arg, cls) else arg for arg in args]
         return func(*new_args, **kwargs)
 
 class RealParam(TensorParam):
@@ -73,26 +73,66 @@ class ComplexParam(TensorParam):
         value = torch.tensor(value, dtype=torch.complex64)
         super()._init(value)
 
+class PositiveParam(TensorParam):
+    def _init(self, value=None):
+        value = torch.tensor(value, dtype=torch.float32)
+        if torch.any(value <= 0):
+            raise ValueError("PositiveParam must be initialized with a strictly positive value")
+
+        internal_value = torch.log(value)
+        super()._init(internal_value)
+
+    def val(self):
+        return torch.exp(self._value)
+
+class NegativeParam(TensorParam):
+    def _init(self, value=None):
+        value_tensor = torch.tensor(value, dtype=torch.float32)
+        if torch.any(value_tensor >= 0):
+            raise ValueError("NegativeParam must be initialized with a strictly negative value")
+
+        internal_value = torch.log(-value_tensor)
+        super()._init(internal_value)
+
+    def val(self):
+        return -torch.exp(self._value)
+
+class UnitParam(TensorParam):
+    def _init(self, value=None):
+        value_tensor = torch.tensor(value, dtype=torch.float32)
+        if torch.any((value_tensor <= 0) | (value_tensor >= 1)):
+            raise ValueError("UnitParam must be initialized with a value strictly between 0 and 1")
+
+        internal_value = torch.log(value_tensor / (1 - value_tensor))
+        super()._init(internal_value)
+
+    def val(self):
+        return torch.sigmoid(self._value)
+
 class Packet:
+    required_dim: int = None
     required_params: dict[str, type] = {}
 
     @abstractmethod
     def __init__(self, reference = None, data = None, value = None):
         if reference is not None and data is None:
             if type(reference) is not type(self):
-                raise TypeError(f"Create packet failed - incorrect reference type {type(reference)}")
+                raise TypeError(f"Create {type(self)} failed - incorrect reference type {type(reference)}")
             self.data = reference.data
         elif reference is None and data is not None:
             if data.keys() != self.required_params.keys():
-                raise KeyError(f"Create packet failed - incorrect parameters provided")
+                raise KeyError(f"Create {type(self)} failed - incorrect parameters provided")
             self.data = data
         elif reference is not None and data is not None:
-            raise ValueError(f"{type(self)} creation failed - conflicting reference and parameters")
+            raise ValueError(f"Create {type(self)} failed - conflicting reference and parameters")
         else:
             self.data = {key: cls() for key, cls in self.required_params.items()}
 
         if value is None:
             value = EMPTY_VALUE
+        elif value.dim() != self.required_dim + 1 and not is_empty(value):
+            raise ValueError(f"Create {type(self)} failed - provided value has incorrect dimensions")
+
         self.value = value
 
     def __getitem__(self, key: str) -> Param:
@@ -195,6 +235,7 @@ class GraphState:
             if any(not is_empty(a.value) for a in new_args):
                 for a in new_args:
                     a.value = a.value if not is_empty(a.value) else torch.tensor(0, dtype=torch.complex64)
+            # TODO if the value was set to be a 0 (i.e. empty), then the packet creation fails
             result.packets.append(type(new_args[idx])(reference=new_args[idx], value=func(*[new_arg.value for new_arg in new_args], **kwargs)))
             for a in new_args:
                 if a.value.numel() == 1 and a.value == torch.tensor([0], dtype=torch.complex64):
@@ -275,7 +316,7 @@ class Graph(Module):
         block_params = block.params
         for param_name, data in block_params.items():
             if data.trainability:
-                self.register_parameter(f"{name}-{param_name}", data.value)
+                self.register_parameter(f"{name}-{param_name}", data._value)
 
         return block
 
@@ -315,7 +356,7 @@ class Graph(Module):
 
             block.params[param] = data
             if data.trainability:
-                self.register_parameter(f"{name}-{param}", data.value)
+                self.register_parameter(f"{name}-{param}", data._value)
 
     def write_requirements(self, name: str, **requirements):
         if name not in self.blocks:
