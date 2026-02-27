@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from primatives import GraphState, GraphIO, Packet
+from primatives import GraphState, GraphIO, Packet, is_empty, EMPTY_VALUE
 
 import torch
 import networkx as nx
@@ -107,7 +107,7 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=2000):
             f = f_packet.value
             base = z_packet.value
             if base.numel() == 0:
-                base = torch.zeros_like(f)
+                base = torch.zeros_like(f) # TODO make sure this isn't making things complex when they should be floats
             ratio = f / base
 
             zero_zero_mask = (base == 0) & (f == 0)
@@ -142,7 +142,7 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=2000):
         Fz = _update_state(graph, z, region)
 
         avg_change = _avg_change(region, Fz, z)
-        print(f"{k}: {avg_change.numpy()}")
+        print(f"{k}: {avg_change.detach().numpy()}")
         if avg_change < tol:
             return z
 
@@ -175,6 +175,35 @@ def _broyden_solve(graph, region, tol=1e-5, max_iters=2000):
     print("Warning -- Broyden did not converge")
     return z
     """
+
+"""
+orig_make_grads = torch.autograd._make_grads
+
+def debug_make_grads(outputs, grads, *args, **kwargs):
+    print("\n--- DEBUG _make_grads ---")
+    print("is_grads_batched:", kwargs.get("is_grads_batched", None))
+
+    for i, (o, g) in enumerate(zip(outputs, grads)):
+        print(f"\nIndex {i}")
+        print("  output shape:", tuple(o.shape))
+        print("  grad shape:  ", None if g is None else tuple(g.shape))
+        print("  output id:   ", id(o))
+        print("  grad id:     ", None if g is None else id(g))
+
+        if g is not None:
+            print("  same object: ", o is g)
+            print("  same storage:", o.data_ptr() == g.data_ptr())
+
+        try:
+            eq = (o == g) if g is not None else None
+            print("  equality result shape:", None if eq is None else tuple(eq.shape))
+        except Exception as e:
+            print("  equality comparison error:", e)
+
+    return orig_make_grads(outputs, grads, *args, **kwargs)
+
+torch.autograd._make_grads = debug_make_grads
+"""
 class CyclicRegionDEQ(torch.autograd.Function):
     @staticmethod
     def forward(ctx, graph, region, packets, *flat_state):
@@ -183,7 +212,6 @@ class CyclicRegionDEQ(torch.autograd.Function):
             z_star = _broyden_solve(graph, region)
         packets, flat_out = z_star.flatten()
 
-        # TODO need to verify that this does not break differentiation
         for new_packet, old_packet in zip(packets, graph.state.packets):
             old_packet.data = new_packet.data
 
@@ -206,40 +234,81 @@ class CyclicRegionDEQ(torch.autograd.Function):
             z_star = _broyden_solve(graph, region)
             f_z = _update_state(graph, z_star, region)
 
+        outputs = f_z.flatten()[1]
+        inputs = z_star.flatten()[1]
+        grad_flat = tuple([g if not is_empty(g) else torch.zeros_like(o) for g, o in zip(grad_flat, outputs)])
         grad_z_star = GraphState.unflatten(graph, packets, grad_flat, graph.state.index)
-        for _, v in graph.state:
-            v.requires_grad_(True)
+        for _, v in grad_z_star:
+            v.value.requires_grad_(True)
 
+        # TODO
+        #  The first time that the empty elements of grad_outputs are set to 0, they take the correct dtype.
+        #  After they have gone through grads, though, they end up with a complex dtype
+        #  Manually setting back to a float destroys the gradients
+        #  So there must be a way to fix the fact that they are becoming complex,
+        #  Or they just need to be completely ignored because they are not part of the region
+        #  Just removing them seems to make higher order gradients break
+        """
+        empty_mask = [is_empty(t) for t in grad_z_star.flatten()[1]]
         def Jt_v(v):
-            grads = torch.autograd.grad(
-                outputs=f_z.values,
-                inputs=z_star.values,
-                grad_outputs=v.values,
+            print("calculating Jt")
+            outputs = f_z.flatten()[1]
+            inputs = z_star.flatten()[1]
+            grad_outputs = v.flatten()[1]
+
+            # Remove elements where empty_mask is True
+            outputs_filtered = tuple(t for t, keep in zip(outputs, empty_mask) if not keep)
+            inputs_filtered = tuple(t for t, keep in zip(inputs, empty_mask) if not keep)
+            grad_outputs_filtered = tuple(t for t, keep in zip(grad_outputs, empty_mask) if not keep)
+
+            grads_filtered = torch.autograd.grad(
+                outputs=outputs_filtered,
+                inputs=inputs_filtered,
+                grad_outputs=grad_outputs_filtered,
                 retain_graph=True,
-                allow_unused=False
+                allow_unused=True,
+                create_graph=True
             )
-            out = GraphState(graph)
-            out.index = z_star.index.copy()
-            out.values = list(grads)
+
+            filtered_iter = iter(grads_filtered)
+            grads = tuple(next(filtered_iter) if not remove else EMPTY_VALUE for remove in empty_mask)
+            out = GraphState.unflatten(graph, z_star.packets, list(grads), graph.state.index)
             return out
+        """
+        def Jt_v(v):
+            grad_outputs = v.flatten()[1]
+            grads = torch.autograd.grad(
+                outputs=outputs,
+                inputs=inputs,
+                grad_outputs=grad_outputs,
+                retain_graph=True,
+                allow_unused=True,
+                create_graph=True
+            )
+
+            out = GraphState.unflatten(graph, z_star.packets, list(grads), graph.state.index)
+            return out
+
 
         # Fixed-point solve for implicit gradient
         v = grad_z_star
         for _ in range(50):             # TODO this should probably be dynamic to convergence, not hardcoded -- also value just explodes?
             v = grad_z_star + Jt_v(v)
 
+        # TODO - since the graph object here is not actually the main graph object, the gradients of the params do not end up getting set correctly
+        #  why did this work previously?
         # Parameter gradients
         params = []
         for block_name in region.block_names:
             block = graph.blocks[block_name]
             if hasattr(block, "params"):
-                params.extend(list([param.value for param in block.params.values() if param.trainable]))
+                params.extend(list([param._value for param in block.params.values() if param.trainable]))
 
         if params:
             param_grads = torch.autograd.grad(
-                outputs=f_z.values,
+                outputs=f_z.flatten()[1],
                 inputs=params,
-                grad_outputs=v.values,
+                grad_outputs=v.flatten()[1],
                 retain_graph=False
             )
 
@@ -249,5 +318,6 @@ class CyclicRegionDEQ(torch.autograd.Function):
                 else:
                     p.grad = p.grad + g
 
-        # No gradient w.r.t. graph / region / z0
-        return (None, None, *(v.flatten()[1]))
+        # TODO
+        #  this does successfully set the gradients for this copy of the graph
+        return (None, None, None, *(v.flatten()[1]))

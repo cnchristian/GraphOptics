@@ -243,7 +243,7 @@ class GraphState:
 
         return result
 
-    def flatten(self):
+    def flatten(self, region=None):
         return self.packets, tuple([packet.value for packet in self.packets])
 
     @classmethod

@@ -167,14 +167,26 @@ class SLMBlock(Block):
             "undiffracted": RealParam(0.5)
         }
 
+        self.params["weights"].set_trainable(True)
+        self.params["biases"].set_trainable(True)
+
     def refresh(self):
         h, w = int(self.requirements["height"]), int(self.requirements["width"])
         # TODO need to adjust this so that I dont have to rewrite undiffracted
+        # TODO name of registered parameter is definitely wrong since it doesn't actually know name of block
+
         self.params = {
             "weights": RealParam(torch.ones(h, w)),
             "biases": RealParam(torch.zeros(h, w)),
             "undiffracted": RealParam(self.params["undiffracted"].val())
         }
+
+        self.params["weights"].set_trainable(True)
+        self.params["biases"].set_trainable(True)
+
+        for param, data in self.params.items():
+            if data.trainability:
+                self.register_parameter(f"slm-{param}", data._value)
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
@@ -188,7 +200,7 @@ class SLMBlock(Block):
         if is_empty(i_field):
             return {"o": FieldPacket(reference=i, value=EMPTY_VALUE)}
         elif is_empty(phase_field):
-            phase_field = torch.zeros((B, h, w), dtype=torch.complex64)
+            phase_field = torch.zeros((B, h, w), dtype=torch.float32)
 
         if not (i_field.shape == phase_field.shape == (B, h, w)):
             raise ValueError(f"SLMBlock compute error - phase array and input do not have matching required shape (B, {h}, {w})")
