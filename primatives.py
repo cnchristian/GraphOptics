@@ -256,6 +256,9 @@ class GraphState:
         return state
 
     def reset(self, inputs: dict[str, Packet]):
+        self.packets: list[Packet] = []
+        self.index: dict[GraphIO, int] = {}
+
         for alias, packet in inputs.items():
             alias_key = self.graph.inputs[alias]
             self[alias_key] = packet
@@ -279,8 +282,25 @@ class GraphState:
 from execution import execute
 # TODO need to be able to handle moving a graph to the GPU (Currently everything starts on the CPU by default)
 #  Graph should have device parameter that all tensors are created on and should have set device routine that changes all current and future tensor locations
+#  this can be done automatically as long as all tensors are registered with the model as either parameters or buffers
+#  need to make sure that everything that isn't a parameter gets registered, which may be more complicated than expected :)
+# TODO
+#  What needs to be registered:
+#    - all block params (done)
+#    - empty values
+#    - superblock modules
+#  That is probably everything?
+#  Then just need to make sure that all execution logic references the device of the graph for any tensor creation
+#  How do we want to handle graphstates?
+#  Since we are recreating the graph state each time we forward, it probably isn't necessary to have the graphstate know what device the graph is on ahead of time
+#  At creation it should just pull the device from the graph it is being created from and use that for all of its tensors
+#  So what is the final list for this?
+#    1) Register empty value with the graph so that it can switch devices
+#    2) make sure superblocks are properly registered so that switching calls are forwarded into them
+#    3) Make a graphstate take a device in constructor and use that device for everything. Model shouldn't worry about switching devices mid-execution.
+#    4) solve everything else that is somehow wrong.
 class Graph(Module):
-    def __init__(self):
+    def __init__(self, device=None):
         super().__init__()
 
         self.blocks = ModuleDict()
@@ -291,6 +311,8 @@ class Graph(Module):
         self.outputs: dict[str, GraphIO] = {}
 
         self.state = GraphState(self)
+
+        self.device = device if not device is None else "cpu"
 
     def add_block(self, name: str, block_type: type):
         if name in self.blocks:
@@ -357,6 +379,8 @@ class Graph(Module):
             block.params[param] = data
             if data.trainability:
                 self.register_parameter(f"{name}-{param}", data._value)
+            else:
+                self.register_buffer(f"{name}-{param}", data._value)
 
     def write_requirements(self, name: str, **requirements):
         if name not in self.blocks:

@@ -222,7 +222,7 @@ class FragmentBlock(Block):
 
     def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
         i = inputs["i"]
-        image = i.value  # assume shape [H, W] or [C, H, W]
+        image = i.value
 
         if is_empty(image):
             return {"o": ImagePacket(reference=i, value=EMPTY_VALUE)}
@@ -252,7 +252,8 @@ class FragmentBlock(Block):
         image = image.unsqueeze(1)
         B, _, H, W = image.shape
 
-        fragments = []
+        accum = 0
+        weight = 0
 
         for ty in range(-tiles_up, tiles_down):
             for tx in range(-tiles_left, tiles_right):
@@ -292,10 +293,19 @@ class FragmentBlock(Block):
                     align_corners=True,
                 )
 
-                fragments.append(fragment)
+                mask = F.grid_sample(
+                    torch.ones_like(image),
+                    grid,
+                    mode="bilinear",
+                    padding_mode="zeros",
+                    align_corners=True,
+                )
 
-        stacked = torch.stack(fragments, dim=0)
-        averaged = stacked.mean(dim=0)
+                accum = accum + fragment
+                weight = weight + mask
+
+
+        averaged = accum / torch.clamp(weight, min=1e-6)
 
         # Remove channel dimension
         averaged = averaged.squeeze(1)

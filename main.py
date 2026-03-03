@@ -17,8 +17,8 @@ upscaling = 4
 
 mirror_reflectance = RealParam(0)
 prop_dist = PositiveParam(2.5e-3)
-slm_width = IntParam(400*upscaling)
-slm_height = IntParam(400*upscaling)
+slm_width = IntParam(280*upscaling)
+slm_height = IntParam(280*upscaling)
 slm_resolution = RealParam(9.2e-6/upscaling)
 slm_undiffracted = UnitParam(0.05)
 beam_splitter_ratio = UnitParam(0.5)
@@ -29,8 +29,8 @@ wavelength = PositiveParam(561e-9)
 
 mask_resolution = 561e-9 * 100e-3 / 9.2e-6
 
-camera_width = IntParam(720//2)
-camera_height = IntParam(540//2)
+camera_width = IntParam(120)
+camera_height = IntParam(120)
 camera_ds = PositiveParam(3.45e-6)
 
 g = Graph()
@@ -123,31 +123,31 @@ img_data = {
 transform = transforms.ToTensor()
 mnist_train = datasets.FashionMNIST(root="./data", train=True, download=True, transform=transform)
 mnist_test = datasets.FashionMNIST(root="./data", train=False, download=True, transform=transform)
-"""
-for img, label in mnist_train:
+
+for img, label in mnist_test:
     if label == 0:
         img1 = np.array(img)  # Convert PIL image to NumPy
         break
-for img, label in mnist_train:
+for img, label in mnist_test:
     if label == 1:
         img2 = np.array(img)  # Convert PIL image to NumPy
         break
 
 img1 = torch.from_numpy(img1).type(torch.float32)
 img2 = torch.from_numpy(img2).type(torch.float32)
-img_packet = ImagePacket(data=img_data, value=torch.stack([img1, img2]))
+img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0)]))
 
 draw_graph(g, "graph.png")
 out = g.compute(input_field=input_packet, img=img_packet)
 
-output_field = np.abs(out["output_field"].value.detach().numpy())
+output_field = np.fft.ifftshift(np.abs(out["output_field"].value.detach().numpy()))
 plt.imshow(output_field[0])
 plt.colorbar()
 plt.show()
 plt.imshow(output_field[1])
 plt.colorbar()
 plt.show()
-"""
+
 
 class compound_model(nn.Module):
     def __init__(self, graph, input_field):
@@ -163,17 +163,21 @@ class compound_model(nn.Module):
         )
 
     def forward(self, x):
-        x1 = self.model.compute(input_field=self.input_field, img=x)
+        # TODO do I actually need to recreate the input field each time?
+        x1 = self.model.compute(input_field=FieldPacket(reference=self.input_field, value=self.input_field.value), img=x)
+        out = x1["output_field"].value
+        #print(id(out))
+        #print(out.requires_grad)
         x2 = self.LC(x1["output_field"].value.unsqueeze(1))
         return x2
 
 
 
-train_loader = DataLoader(Subset(mnist_train, range(0, 6)), batch_size=2, shuffle=True)
+train_loader = DataLoader(Subset(mnist_train, range(0, 2)), batch_size=2, shuffle=True)
 test_loader = DataLoader(Subset(mnist_test, range(0, 2)), batch_size=2, shuffle=True)
 
 model = compound_model(g, input_packet)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-1)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss_function = torch.nn.CrossEntropyLoss()
 
 initial_weights = g.blocks["slm"].params["weights"]._value.clone().detach().cpu().numpy()
@@ -196,8 +200,13 @@ fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 plt.tight_layout()
 plt.show()
 
+# TODO - Only the first epoch seems to actually be doing anything to model parameters
+#  Currently unclear why future epochs still work on LC but fail on model
+#  All epochs after number 1 also run way faster which makes no sense
 torch.autograd.set_detect_anomaly(True)
-for epoch in range(5):
+accumulation_steps = 1
+print("Starting Training")
+for epoch in range(20):
     model.train(True)
     running_train_loss = 0
     for step, (train_images, train_labels) in enumerate(train_loader):
@@ -217,9 +226,14 @@ for epoch in range(5):
 
         # Backward pass and optimize
         train_loss.backward()
-
-        optimizer.step()  # Update model weights
-        optimizer.zero_grad()  # Reset gradients
+        """
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                print(name, param.grad.abs().mean())
+        """
+        if (step + 1) % accumulation_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad()
 
         running_train_loss += train_loss
 
@@ -259,4 +273,14 @@ axes[1].axis("off")
 fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
 plt.tight_layout()
+plt.show()
+
+out = g.compute(input_field=input_packet, img=img_packet)
+
+output_field = np.fft.ifftshift(np.abs(out["output_field"].value.detach().numpy()))
+plt.imshow(output_field[0])
+plt.colorbar()
+plt.show()
+plt.imshow(output_field[1])
+plt.colorbar()
 plt.show()
