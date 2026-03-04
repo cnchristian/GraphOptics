@@ -120,14 +120,19 @@ class Packet:
             if type(reference) is not type(self):
                 raise TypeError(f"Create {type(self)} failed - incorrect reference type {type(reference)}")
             self.data = reference.data
+            self.device = reference.device
         elif reference is None and data is not None:
             if data.keys() != self.required_params.keys():
                 raise KeyError(f"Create {type(self)} failed - incorrect parameters provided")
+            if len({v.device for v in data.values() if torch.is_tensor(v)}) > 1:
+                raise KeyError(f"Create {type(self)} failed - data lives on multiple devices")
             self.data = data
+            self.device = next(iter({v.device for v in data.values() if torch.is_tensor(v)}), "cpu")
         elif reference is not None and data is not None:
             raise ValueError(f"Create {type(self)} failed - conflicting reference and parameters")
         else:
             self.data = {key: cls() for key, cls in self.required_params.items()}
+            self.device = "cpu"
 
         if value is None:
             value = EMPTY_VALUE
@@ -138,6 +143,17 @@ class Packet:
 
     def __getitem__(self, key: str) -> Param:
         return self.data[key]
+
+    #---------------------------------------------
+    #----------- New Addition --------------------
+    #---------------------------------------------
+    def to(self, device):
+        self.device = device
+        self.value = self.value.to(device)
+        self.data = {k: v.to(device) if torch.is_tensor(v) else v for k, v in self.data.items()}
+    # ---------------------------------------------
+    # ---------------------------------------------
+    # ---------------------------------------------
 
     def set_data(self, data: dict[str, Param]):
         if self.data.keys() != data.keys():
@@ -454,9 +470,12 @@ class Graph(Module):
         self.outputs[alias] = output_io
         return output_io
 
+    # TODO should check that all input packets live on the same device as the graph does
     def compute(self, **inputs):
         if not inputs.keys() == self.inputs.keys():
             raise KeyError("Graph compute failed - incorrect inputs provided")
+        if not all(packet.device == self.device for packet in inputs.values()):
+            raise RuntimeError(f"Graph compute failed - some inputs are not on graph device {self.device}")
 
         computed_state = execute(self, inputs)
 

@@ -33,7 +33,7 @@ camera_width = IntParam(120)
 camera_height = IntParam(120)
 camera_ds = PositiveParam(3.45e-6)
 
-g = Graph(device="gpu")
+g = Graph(device="cpu")
 
 # FP Cavity
 g.add_block("mirror", MirrorBlock)
@@ -111,7 +111,7 @@ input_field_data = {
 }
 input_field = torch.ones((slm_height.val(), slm_width.val()), dtype=torch.complex64).unsqueeze(0).repeat(2, 1, 1)
 input_field.requires_grad_(True)
-input_packet = FieldPacket(data=input_field_data, value=input_field)
+input_packet = FieldPacket(data=input_field_data, value=input_field).to("cpu")
 
 img_data = {
     "height": IntParam(28),
@@ -135,7 +135,7 @@ for img, label in mnist_test:
 
 img1 = torch.from_numpy(img1).type(torch.float32)
 img2 = torch.from_numpy(img2).type(torch.float32)
-img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0)]))
+img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0)])).to("cpu")
 
 draw_graph(g, "graph.png")
 out = g.compute(input_field=input_packet, img=img_packet)
