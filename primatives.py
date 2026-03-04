@@ -35,12 +35,13 @@ class IntParam(Param):
     def _init(self, value=None):
         if not isinstance(value, int):
             raise TypeError("IntParam create failed - value must be integer")
+        value = torch.tensor(value, dtype=torch.int64)
         super()._init(value)
 
     def val(self):
         return int(self._value)
 
-class TensorParam(Param):
+class ContinuousParam(Param):
     trainability = True
 
     @abstractmethod
@@ -63,17 +64,17 @@ class TensorParam(Param):
         new_args = [arg._value if isinstance(arg, cls) else arg for arg in args]
         return func(*new_args, **kwargs)
 
-class RealParam(TensorParam):
+class RealParam(ContinuousParam):
     def _init(self, value=None):
         value = torch.tensor(value, dtype=torch.float32)
         super()._init(value)
 
-class ComplexParam(TensorParam):
+class ComplexParam(ContinuousParam):
     def _init(self, value=None):
         value = torch.tensor(value, dtype=torch.complex64)
         super()._init(value)
 
-class PositiveParam(TensorParam):
+class PositiveParam(ContinuousParam):
     def _init(self, value=None):
         value = torch.tensor(value, dtype=torch.float32)
         if torch.any(value <= 0):
@@ -85,7 +86,7 @@ class PositiveParam(TensorParam):
     def val(self):
         return torch.exp(self._value)
 
-class NegativeParam(TensorParam):
+class NegativeParam(ContinuousParam):
     def _init(self, value=None):
         value_tensor = torch.tensor(value, dtype=torch.float32)
         if torch.any(value_tensor >= 0):
@@ -97,7 +98,7 @@ class NegativeParam(TensorParam):
     def val(self):
         return -torch.exp(self._value)
 
-class UnitParam(TensorParam):
+class UnitParam(ContinuousParam):
     def _init(self, value=None):
         value_tensor = torch.tensor(value, dtype=torch.float32)
         if torch.any((value_tensor <= 0) | (value_tensor >= 1)):
@@ -114,7 +115,7 @@ class Packet:
     required_params: dict[str, type] = {}
 
     @abstractmethod
-    def __init__(self, reference = None, data = None, value = None):
+    def __init__(self, reference=None, data=None, value=None):
         if reference is not None and data is None:
             if type(reference) is not type(self):
                 raise TypeError(f"Create {type(self)} failed - incorrect reference type {type(reference)}")
@@ -234,11 +235,11 @@ class GraphState:
             idx = next((i for i, arg in enumerate(new_args) if not is_empty(arg.value)), 0)
             if any(not is_empty(a.value) for a in new_args):
                 for a in new_args:
-                    a.value = a.value if not is_empty(a.value) else torch.tensor(0, dtype=torch.complex64)
+                    a.value = a.value if not is_empty(a.value) else torch.tensor(0, dtype=torch.complex64, device=ref.graph.device)
             # TODO if the value was set to be a 0 (i.e. empty), then the packet creation fails
             result.packets.append(type(new_args[idx])(reference=new_args[idx], value=func(*[new_arg.value for new_arg in new_args], **kwargs)))
             for a in new_args:
-                if a.value.numel() == 1 and a.value == torch.tensor([0], dtype=torch.complex64):
+                if a.value.numel() == 1 and a.value == torch.tensor(0, dtype=torch.complex64, device=ref.graph.device):
                     a.value = EMPTY_VALUE
 
         return result
@@ -295,9 +296,12 @@ from execution import execute
 #  Since we are recreating the graph state each time we forward, it probably isn't necessary to have the graphstate know what device the graph is on ahead of time
 #  At creation it should just pull the device from the graph it is being created from and use that for all of its tensors
 #  So what is the final list for this?
-#    1) Register empty value with the graph so that it can switch devices
-#    2) make sure superblocks are properly registered so that switching calls are forwarded into them
-#    3) Make a graphstate take a device in constructor and use that device for everything. Model shouldn't worry about switching devices mid-execution.
+#    1) Register empty value with the graph so that it can switch devices -- actually does this matter since we never use the empty, we just check if it is empty -- no actually we do use it just in adjoint calculation... (done)
+#        New rule should be that we *never* actually use EMPTY_VALUE for anything so that we don't need to worry about its device
+#        Therefore what must actually be done here is for gradient adjoint calculation to be adjusted such that this is not an issue
+#        This is actually already the case, so we are done here.
+#    2) make sure superblocks are properly registered so that switching calls are forwarded into them (done)
+#    3) Make a graphstate take a device in constructor and use that device for everything. Model shouldn't worry about switching devices mid-execution. (done)
 #    4) solve everything else that is somehow wrong.
 class Graph(Module):
     def __init__(self, device=None):
@@ -313,6 +317,22 @@ class Graph(Module):
         self.state = GraphState(self)
 
         self.device = device if not device is None else "cpu"
+
+    def _apply(self, fn):
+        # Call parent logic (this moves parameters/buffers)
+        super()._apply(fn)
+
+        # After applying, infer device from parameters
+        try:
+            self.device = next(self.parameters()).device
+        except StopIteration:
+            # If no parameters, check buffers
+            try:
+                self.device = next(self.buffers()).device
+            except StopIteration:
+                pass  # no params or buffers
+
+        return self
 
     def add_block(self, name: str, block_type: type):
         if name in self.blocks:
@@ -339,6 +359,8 @@ class Graph(Module):
         for param_name, data in block_params.items():
             if data.trainability:
                 self.register_parameter(f"{name}-{param_name}", data._value)
+            else:
+                self.register_buffer(f"{name}-{param_name}", data._value)
 
         return block
 
@@ -377,10 +399,17 @@ class Graph(Module):
                 raise KeyError(f"Write param failed - Block \"{name}\" has no parameter \"{param}\"")
 
             block.params[param] = data
+
+            internal_name = f"{name}-{param}"
+            if internal_name in self._parameters:
+                del self._parameters[internal_name]
+            if internal_name in self._buffers:
+                del self._buffers[internal_name]
+
             if data.trainability:
-                self.register_parameter(f"{name}-{param}", data._value)
+                self.register_parameter(internal_name, data._value)
             else:
-                self.register_buffer(f"{name}-{param}", data._value)
+                self.register_buffer(internal_name, data._value)
 
     def write_requirements(self, name: str, **requirements):
         if name not in self.blocks:

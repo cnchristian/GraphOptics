@@ -33,7 +33,7 @@ camera_width = IntParam(120)
 camera_height = IntParam(120)
 camera_ds = PositiveParam(3.45e-6)
 
-g = Graph()
+g = Graph(device="gpu")
 
 # FP Cavity
 g.add_block("mirror", MirrorBlock)
