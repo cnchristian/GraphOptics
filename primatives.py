@@ -124,10 +124,10 @@ class Packet:
         elif reference is None and data is not None:
             if data.keys() != self.required_params.keys():
                 raise KeyError(f"Create {type(self)} failed - incorrect parameters provided")
-            if len({v.device for v in data.values() if torch.is_tensor(v)}) > 1:
+            if len({v._value.device for v in data.values() if torch.is_tensor(v)}) > 1:
                 raise KeyError(f"Create {type(self)} failed - data lives on multiple devices")
             self.data = data
-            self.device = next(iter({v.device for v in data.values() if torch.is_tensor(v)}), "cpu")
+            self.device = next(iter({v._value.device for v in data.values() if torch.is_tensor(v)}), "cpu")
         elif reference is not None and data is not None:
             raise ValueError(f"Create {type(self)} failed - conflicting reference and parameters")
         else:
@@ -150,7 +150,9 @@ class Packet:
     def to(self, device):
         self.device = device
         self.value = self.value.to(device)
-        self.data = {k: v.to(device) if torch.is_tensor(v) else v for k, v in self.data.items()}
+        for param in self.data.values():
+            if torch.is_tensor(param._value):
+                param._value = param._value.to(device)
     # ---------------------------------------------
     # ---------------------------------------------
     # ---------------------------------------------

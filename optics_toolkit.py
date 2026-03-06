@@ -34,9 +34,9 @@ class PropagationBlock(Block):
             "distance": RealParam(1)
         }
 
-    def generate_H(self, distance, wavelength, width, height, ds):
-        f_x = torch.fft.fftfreq(width * 2, d=ds)
-        f_y = torch.fft.fftfreq(height * 2, d=ds)
+    def generate_H(self, distance, wavelength, width, height, ds, device):
+        f_x = torch.fft.fftfreq(width * 2, d=ds, device=device)
+        f_y = torch.fft.fftfreq(height * 2, d=ds, device=device)
         F_Y, F_X = torch.meshgrid(f_y, f_x, indexing='ij')
 
         du_x = 1 / (width * 2 * ds)
@@ -51,14 +51,14 @@ class PropagationBlock(Block):
                       torch.sqrt(1 - (wavelength * F_X) ** 2 - (wavelength * F_Y) ** 2)) * H_limit
         return H.unsqueeze(0)
 
-    def generate_M(self, width, height):
+    def generate_M(self, width, height, device):
         offset_w = width // 2
         offset_h = height // 2
         start_w, end_w = offset_w, offset_w + width
         start_h, end_h = offset_h, offset_h + height
 
         # Create a 2D mask for the 28x28 image
-        M = torch.zeros((2*height, 2*width), dtype=torch.complex64)
+        M = torch.zeros((2*height, 2*width), dtype=torch.complex64, device=device)
         M[start_h:end_h, start_w:end_w] = 1.0
 
         return M.unsqueeze(0)
@@ -68,7 +68,7 @@ class PropagationBlock(Block):
         h_start = H // 2
         w_start = W // 2
 
-        i_pad = torch.zeros((B, 2 * H, 2 * W), dtype=torch.complex64)
+        i_pad = torch.zeros((B, 2 * H, 2 * W), dtype=torch.complex64, device=i.device)
         i_pad[:, h_start:h_start + H, w_start:w_start + W] = i
 
         return i_pad
@@ -94,8 +94,8 @@ class PropagationBlock(Block):
 
         distance = self.params["distance"].val()
 
-        H = self.generate_H(distance, wavelength, width, height, ds)
-        M = self.generate_M(width, height)
+        H = self.generate_H(distance, wavelength, width, height, ds, field.device)
+        M = self.generate_M(width, height, field.device)
 
         return{
             "o": FieldPacket(reference=i, value=self.crop(torch.fft.ifft2(H * torch.fft.fft2(self.pad(field))) * M))
@@ -132,10 +132,10 @@ class MirrorBlock(Block):
                     "o2": FieldPacket(reference=i2, value=EMPTY_VALUE)}
         elif is_empty(field1):
             ref = i2
-            field1 = torch.zeros((B, h2, w2), dtype=torch.complex64)
+            field1 = torch.zeros((B, h2, w2), dtype=torch.complex64, device=field2.device)
         elif is_empty(field2):
             ref = i1
-            field2 = torch.zeros((B, h1, w1), dtype=torch.complex64)
+            field2 = torch.zeros((B, h1, w1), dtype=torch.complex64, device=field1.device)
         else:
             ref = i1
             if (h1, w1) != (h2, w2):

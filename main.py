@@ -1,3 +1,5 @@
+import time
+
 from torch.utils.data import DataLoader, Subset
 
 from primatives import RealParam, Graph, IntParam, UnitParam, PositiveParam
@@ -29,8 +31,8 @@ wavelength = PositiveParam(561e-9)
 
 mask_resolution = 561e-9 * 100e-3 / 9.2e-6
 
-camera_width = IntParam(120)
-camera_height = IntParam(120)
+camera_width = IntParam(30)
+camera_height = IntParam(30)
 camera_ds = PositiveParam(3.45e-6)
 
 g = Graph(device="cpu")
@@ -101,8 +103,8 @@ g.set_input("input_field", "mirror", "i1")
 g.set_input("img", "rescale", "i")
 g.set_output("output_field", "fragment", "o")
 
+g = g.to("cuda")
 
-# TODO maybe these need to require grad for this to work?
 input_field_data = {
     "height": slm_height,
     "width": slm_width,
@@ -111,7 +113,7 @@ input_field_data = {
 }
 input_field = torch.ones((slm_height.val(), slm_width.val()), dtype=torch.complex64).unsqueeze(0).repeat(2, 1, 1)
 input_field.requires_grad_(True)
-input_packet = FieldPacket(data=input_field_data, value=input_field).to("cpu")
+input_packet = FieldPacket(data=input_field_data, value=input_field).to("cuda")
 
 img_data = {
     "height": IntParam(28),
@@ -135,12 +137,12 @@ for img, label in mnist_test:
 
 img1 = torch.from_numpy(img1).type(torch.float32)
 img2 = torch.from_numpy(img2).type(torch.float32)
-img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0)])).to("cpu")
+img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0)])).to("cuda")
 
 draw_graph(g, "graph.png")
 out = g.compute(input_field=input_packet, img=img_packet)
 
-output_field = np.fft.ifftshift(np.abs(out["output_field"].value.detach().numpy()))
+output_field = np.fft.ifftshift(np.abs(out["output_field"].value.detach().cpu().numpy()))
 plt.imshow(output_field[0])
 plt.colorbar()
 plt.show()
@@ -176,7 +178,7 @@ class compound_model(nn.Module):
 train_loader = DataLoader(Subset(mnist_train, range(0, 2)), batch_size=2, shuffle=True)
 test_loader = DataLoader(Subset(mnist_test, range(0, 2)), batch_size=2, shuffle=True)
 
-model = compound_model(g, input_packet)
+model = compound_model(g, input_packet).to("cuda")
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss_function = torch.nn.CrossEntropyLoss()
 
@@ -200,18 +202,29 @@ fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 plt.tight_layout()
 plt.show()
 
-# TODO - Only the first epoch seems to actually be doing anything to model parameters
-#  Currently unclear why future epochs still work on LC but fail on model
-#  All epochs after number 1 also run way faster which makes no sense
 torch.autograd.set_detect_anomaly(True)
+
 accumulation_steps = 1
 print("Starting Training")
-for epoch in range(20):
+total_epochs = 10
+
+train_losses = []
+test_losses = []
+train_accuracies = []
+test_accuracies = []
+
+for epoch in range(total_epochs):
+    start_time = time.time()
     model.train(True)
+
     running_train_loss = 0
+    correct_train = 0
+    total_train = 0
+
     for step, (train_images, train_labels) in enumerate(train_loader):
         # Move the data to the GPU
-        train_images, train_labels = train_images, train_labels
+        train_images = train_images.to("cuda")
+        train_labels = train_labels.to("cuda")
 
         train_packets = ImagePacket(data=img_data, value=train_images.squeeze(1))
 
@@ -219,41 +232,86 @@ for epoch in range(20):
         optimizer.zero_grad()
 
         # Forward pass
-        train_outputs = model.forward(train_packets)
+        train_outputs = model(train_packets)
 
         # Calculate the loss
         train_loss = loss_function(train_outputs, train_labels)
 
         # Backward pass and optimize
         train_loss.backward()
-        """
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                print(name, param.grad.abs().mean())
-        """
+
         if (step + 1) % accumulation_steps == 0:
             optimizer.step()
             optimizer.zero_grad()
 
-        running_train_loss += train_loss
+        running_train_loss += train_loss.item()
+
+        _, predicted = torch.max(train_outputs, 1)
+        correct_train += (predicted == train_labels).sum().item()
+        total_train += train_labels.size(0)
 
     avg_train_loss = running_train_loss / len(train_loader)
+    train_accuracy = 100 * correct_train / total_train
+
+    train_losses.append(avg_train_loss)
+    train_accuracies.append(train_accuracy)
 
     model.eval()
     running_test_loss = 0
+    correct_test = 0
+    total_test = 0
+
     with torch.no_grad():
         for test_images, test_labels in test_loader:
-            test_images, test_labels = test_images, test_labels
+            test_images = test_images.to("cuda")
+            test_labels = test_labels.to("cuda")
 
             test_packets = ImagePacket(data=img_data, value=test_images.squeeze(1))
 
-            test_outputs = model.forward(test_packets)
+            test_outputs = model(test_packets)
             test_loss = loss_function(test_outputs, test_labels)
-            running_test_loss += test_loss
+
+            running_test_loss += test_loss.item()
+
+            _, predicted = torch.max(test_outputs, 1)
+            correct_test += (predicted == test_labels).sum().item()
+            total_test += test_labels.size(0)
 
     avg_test_loss = running_test_loss / len(test_loader)
+    test_accuracy = 100 * correct_test / total_test
 
-    print(avg_train_loss, avg_test_loss)
+    test_losses.append(avg_test_loss)
+    test_accuracies.append(test_accuracy)
+
+    end_time = time.time()
+
+    print(f"Epoch [{epoch+1}/{total_epochs}] | "
+          f"Train Loss: {avg_train_loss:.4f} | "
+          f"Train Accuracy: {train_accuracy:.2f} | "
+          f"Test Loss: {avg_test_loss:.4f} | "
+          f"Test Accuracy: {test_accuracy:.2f} | "
+          f"Time: {end_time - start_time:.2f}"
+    )
+
+epochs_range = range(1, total_epochs + 1)
+
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.plot(epochs_range, train_losses, label="Training Loss")
+plt.plot(epochs_range, test_losses, label="Testing Loss")
+plt.xlabel("Epochs")
+plt.ylabel("Loss")
+plt.title("Training and Testing Loss")
+plt.legend()
+plt.subplot(1, 2, 2)
+plt.plot(epochs_range, train_accuracies, label="Training Accuracy")
+plt.plot(epochs_range, test_accuracies, label="Testing Accuracy")
+plt.xlabel("Epochs")
+plt.ylabel("Accuracy (%)")
+plt.title("Training and Testing Accuracy")
+plt.legend()
+plt.tight_layout()
+plt.show()
 
 final_weights = g.blocks["slm"].params["weights"]._value.clone().detach().cpu().numpy()
 final_biases = g.blocks["slm"].params["biases"]._value.clone().detach().cpu().numpy()
@@ -277,10 +335,10 @@ plt.show()
 
 out = g.compute(input_field=input_packet, img=img_packet)
 
-output_field = np.fft.ifftshift(np.abs(out["output_field"].value.detach().numpy()))
+output_field = np.fft.ifftshift(np.abs(out["output_field"].value.detach().cpu().numpy()))
 plt.imshow(output_field[0])
 plt.colorbar()
 plt.show()
 plt.imshow(output_field[1])
 plt.colorbar()
-plt.show()
+plt.show(block=True)
