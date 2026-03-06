@@ -1,4 +1,6 @@
 /.idea
 /.venv
-/graph.png
+/results
 /data
+/jobs
+watch_*.log

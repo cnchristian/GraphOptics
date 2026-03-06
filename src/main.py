@@ -3,7 +3,7 @@ import time
 from torch.utils.data import DataLoader, Subset
 
 from primatives import RealParam, Graph, IntParam, UnitParam, PositiveParam
-from utilities import draw_graph
+#from utilities import draw_graph
 from optics_toolkit import PropagationBlock, MirrorBlock, SLMBlock, FieldPacket, CameraBlock, FourFBlock
 from image_toolkit import PadBlock, ImagePacket, TessellateBlock, ValueScaleBlock, ScaleBlock, FragmentBlock, CropBlock
 
@@ -112,7 +112,7 @@ if __name__ == "__main__":
         "ds": slm_resolution,
         "wavelength": wavelength,
     }
-    input_field = torch.ones((slm_height.val(), slm_width.val()), dtype=torch.complex64).unsqueeze(0).repeat(2, 1, 1)
+    input_field = torch.ones((slm_height.val(), slm_width.val()), dtype=torch.complex64).unsqueeze(0).repeat(20, 1, 1)
     input_field.requires_grad_(True)
     input_packet = FieldPacket(data=input_field_data, value=input_field).to("cuda")
 
@@ -124,8 +124,8 @@ if __name__ == "__main__":
     }
 
     transform = transforms.ToTensor()
-    mnist_train = datasets.FashionMNIST(root="./data", train=True, download=True, transform=transform)
-    mnist_test = datasets.FashionMNIST(root="./data", train=False, download=True, transform=transform)
+    mnist_train = datasets.FashionMNIST(root='../data', train=True, download=False, transform=transform)
+    mnist_test = datasets.FashionMNIST(root='../data', train=False, download=False, transform=transform)
 
     for img, label in mnist_test:
         if label == 0:
@@ -136,17 +136,23 @@ if __name__ == "__main__":
             img2 = np.array(img)  # Convert PIL image to NumPy
             break
 
+    plt.figure()
+    plt.imshow(img1[0])
+    plt.savefig("test1.png")
     img1 = torch.from_numpy(img1).type(torch.float32)
     img2 = torch.from_numpy(img2).type(torch.float32)
-    img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0)])).to("cuda")
+    img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0)])).to("cuda")
 
-    draw_graph(g, "../graph.png")
+
+    #draw_graph(g, "../graph.png")
     out = g.compute(input_field=input_packet, img=img_packet)
 
     output_field = np.fft.ifftshift(np.abs(out["output_field"].value.detach().cpu().numpy()))
+    plt.figure()
     plt.imshow(output_field[0])
     plt.colorbar()
     plt.savefig('initial_output_1.png')
+    plt.figure()
     plt.imshow(output_field[1])
     plt.colorbar()
     plt.savefig('initial_output_2.png')
@@ -176,11 +182,11 @@ if __name__ == "__main__":
 
 
 
-    train_loader = DataLoader(Subset(mnist_train, range(0, 2)), batch_size=2, shuffle=True)
-    test_loader = DataLoader(Subset(mnist_test, range(0, 2)), batch_size=2, shuffle=True)
+    train_loader = DataLoader(Subset(mnist_train, range(0, 960)), batch_size=20, shuffle=True)
+    test_loader = DataLoader(Subset(mnist_test, range(0, 240)), batch_size=20, shuffle=True)
 
     model = compound_model(g, input_packet).to("cuda")
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
     loss_function = torch.nn.CrossEntropyLoss()
 
     initial_weights = g.blocks["slm"].params["weights"]._value.clone().detach().cpu().numpy()
@@ -207,7 +213,7 @@ if __name__ == "__main__":
 
     accumulation_steps = 1
     print("Starting Training")
-    total_epochs = 10
+    total_epochs = 100
 
     train_losses = []
     test_losses = []
@@ -336,10 +342,12 @@ if __name__ == "__main__":
 
     out = g.compute(input_field=input_packet, img=img_packet)
 
+    plt.figure()
     output_field = np.fft.ifftshift(np.abs(out["output_field"].value.detach().cpu().numpy()))
     plt.imshow(output_field[0])
     plt.colorbar()
     plt.savefig('final_output_1.png')
+    plt.figure()
     plt.imshow(output_field[1])
     plt.colorbar()
     plt.savefig('final_output_2.png')

@@ -153,6 +153,8 @@ class Packet:
         for param in self.data.values():
             if torch.is_tensor(param._value):
                 param._value = param._value.to(device)
+
+        return self
     # ---------------------------------------------
     # ---------------------------------------------
     # ---------------------------------------------
@@ -476,8 +478,8 @@ class Graph(Module):
     def compute(self, **inputs):
         if not inputs.keys() == self.inputs.keys():
             raise KeyError("Graph compute failed - incorrect inputs provided")
-        if not all(packet.device == self.device for packet in inputs.values()):
-            raise RuntimeError(f"Graph compute failed - some inputs are not on graph device {self.device}")
+        #if not all(packet.device == self.device for packet in inputs.values()):
+        #    raise RuntimeError(f"Graph compute failed - some inputs are not on graph device {self.device}")
 
         computed_state = execute(self, inputs)
 
