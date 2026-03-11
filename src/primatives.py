@@ -45,10 +45,13 @@ class ContinuousParam(Param):
     trainability = True
 
     @abstractmethod
-    def _init(self, value=None):
+    def _init(self, value=None, relative_lr=None):
         super()._init(value)
         self.trainable = False
         self._value.requires_grad_(False)
+
+        if relative_lr is not None:
+            self.set_relative_lr(relative_lr)
 
     def val(self):
         return self._value
@@ -56,6 +59,13 @@ class ContinuousParam(Param):
     def set_trainable(self, trainable):
         self.trainable = trainable
         self._value.requires_grad_(trainable)
+
+    def set_relative_lr(self, relative_lr):
+        if not self.trainability:
+            raise ValueError("Cannot set relative learning rate for parameters that do not have trainability")
+        if not self.trainable:
+            raise ValueError("Cannot register hook to parameter that is not trainable")
+        self._value.register_hook(lambda g: g * relative_lr)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
@@ -249,14 +259,12 @@ class GraphState:
         result = cls(ref.graph)
         result.index = ref.index.copy()
 
-        # TODO this has become so convoluted that I should really just hardcode the few functions that are necessary
         for i in range(n):
             new_args = [arg.packets[i] if isinstance(arg, GraphState) else arg for arg in args]
             idx = next((i for i, arg in enumerate(new_args) if not is_empty(arg.value)), 0)
             if any(not is_empty(a.value) for a in new_args):
                 for a in new_args:
                     a.value = a.value if not is_empty(a.value) else torch.tensor(0, dtype=torch.complex64, device=ref.graph.device)
-            # TODO if the value was set to be a 0 (i.e. empty), then the packet creation fails
             result.packets.append(type(new_args[idx])(reference=new_args[idx], value=func(*[new_arg.value for new_arg in new_args], **kwargs)))
             for a in new_args:
                 if a.value.numel() == 1 and a.value == torch.tensor(0, dtype=torch.complex64, device=ref.graph.device):
@@ -300,29 +308,9 @@ class GraphState:
                 if not input_key in self:
                     self[input_key] = block.inputs[input_name]()
 
+
 from execution import execute
-# TODO need to be able to handle moving a graph to the GPU (Currently everything starts on the CPU by default)
-#  Graph should have device parameter that all tensors are created on and should have set device routine that changes all current and future tensor locations
-#  this can be done automatically as long as all tensors are registered with the model as either parameters or buffers
-#  need to make sure that everything that isn't a parameter gets registered, which may be more complicated than expected :)
-# TODO
-#  What needs to be registered:
-#    - all block params (done)
-#    - empty values
-#    - superblock modules
-#  That is probably everything?
-#  Then just need to make sure that all execution logic references the device of the graph for any tensor creation
-#  How do we want to handle graphstates?
-#  Since we are recreating the graph state each time we forward, it probably isn't necessary to have the graphstate know what device the graph is on ahead of time
-#  At creation it should just pull the device from the graph it is being created from and use that for all of its tensors
-#  So what is the final list for this?
-#    1) Register empty value with the graph so that it can switch devices -- actually does this matter since we never use the empty, we just check if it is empty -- no actually we do use it just in adjoint calculation... (done)
-#        New rule should be that we *never* actually use EMPTY_VALUE for anything so that we don't need to worry about its device
-#        Therefore what must actually be done here is for gradient adjoint calculation to be adjusted such that this is not an issue
-#        This is actually already the case, so we are done here.
-#    2) make sure superblocks are properly registered so that switching calls are forwarded into them (done)
-#    3) Make a graphstate take a device in constructor and use that device for everything. Model shouldn't worry about switching devices mid-execution. (done)
-#    4) solve everything else that is somehow wrong.
+
 class Graph(Module):
     def __init__(self, device=None):
         super().__init__()
@@ -474,12 +462,9 @@ class Graph(Module):
         self.outputs[alias] = output_io
         return output_io
 
-    # TODO should check that all input packets live on the same device as the graph does
     def compute(self, **inputs):
         if not inputs.keys() == self.inputs.keys():
             raise KeyError("Graph compute failed - incorrect inputs provided")
-        #if not all(packet.device == self.device for packet in inputs.values()):
-        #    raise RuntimeError(f"Graph compute failed - some inputs are not on graph device {self.device}")
 
         computed_state = execute(self, inputs)
 

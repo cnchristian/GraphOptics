@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, Subset
 from primatives import RealParam, Graph, IntParam, UnitParam, PositiveParam
 #from utilities import draw_graph
 from optics_toolkit import PropagationBlock, MirrorBlock, SLMBlock, FieldPacket, CameraBlock, FourFBlock
-from image_toolkit import PadBlock, ImagePacket, TessellateBlock, ValueScaleBlock, ScaleBlock, FragmentBlock, CropBlock
+from image_toolkit import PadBlock, ImagePacket, TessellateBlock, ValueScaleBlock, ScaleBlock, FragmentBlock, CropBlock, NormalizeBlock
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from torchvision import datasets, transforms
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 if __name__ == "__main__":
     upscaling = 4
@@ -24,6 +26,11 @@ if __name__ == "__main__":
     slm_height = IntParam(280*upscaling)
     slm_resolution = RealParam(9.2e-6/upscaling)
     slm_undiffracted = UnitParam(0.05)
+    slm_initial_weights = RealParam(torch.ones(slm_height.val(), slm_width.val()))
+    slm_initial_weights.set_trainable(True)
+    slm_initial_weights.set_relative_lr(100)
+
+
     beam_splitter_ratio = UnitParam(0.5)
     l1_focal_length = RealParam(100e-3)
     l2_focal_length = RealParam(35e-3)
@@ -66,7 +73,8 @@ if __name__ == "__main__":
     Y, X = torch.meshgrid(y, x, indexing='ij')
     slm_curvature = RealParam(-(k / (2 * 25)) * (X**2 + Y**2))
     slm_curvature.set_trainable(True)
-    g.write_params("slm", biases=slm_curvature)
+    slm_curvature.set_relative_lr(100)
+    g.write_params("slm", biases=slm_curvature, weights=slm_initial_weights)
 
     # Imaging Arm
     g.add_block("4F", FourFBlock)
@@ -85,6 +93,9 @@ if __name__ == "__main__":
     g.write_params("fragment", individual_width=small_size_float, individual_height=small_size_float)
     g.add_link("camera", "o", "fragment", "i")
 
+    g.add_block("normalize", NormalizeBlock)
+    g.add_link("fragment", "o", "normalize", "i")
+
     # Phase Encoding
     g.add_block("rescale", ValueScaleBlock)
     g.write_params("rescale", min_value=RealParam(0), max_value=RealParam(2*np.pi))
@@ -102,9 +113,9 @@ if __name__ == "__main__":
     # IO Configuration
     g.set_input("input_field", "mirror", "i1")
     g.set_input("img", "rescale", "i")
-    g.set_output("output_field", "fragment", "o")
+    g.set_output("output_field", "normalize", "o")
 
-    g = g.to("cuda")
+    g = g.to(device)
 
     input_field_data = {
         "height": slm_height,
@@ -114,7 +125,7 @@ if __name__ == "__main__":
     }
     input_field = torch.ones((slm_height.val(), slm_width.val()), dtype=torch.complex64).unsqueeze(0).repeat(20, 1, 1)
     input_field.requires_grad_(True)
-    input_packet = FieldPacket(data=input_field_data, value=input_field).to("cuda")
+    input_packet = FieldPacket(data=input_field_data, value=input_field).to(device)
 
     img_data = {
         "height": IntParam(28),
@@ -141,7 +152,7 @@ if __name__ == "__main__":
     plt.savefig("test1.png")
     img1 = torch.from_numpy(img1).type(torch.float32)
     img2 = torch.from_numpy(img2).type(torch.float32)
-    img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0)])).to("cuda")
+    img_packet = ImagePacket(data=img_data, value=torch.stack([img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0),img1.squeeze(0), img2.squeeze(0)])).to(device)
 
 
     #draw_graph(g, "../graph.png")
@@ -182,11 +193,11 @@ if __name__ == "__main__":
 
 
 
-    train_loader = DataLoader(Subset(mnist_train, range(0, 960)), batch_size=20, shuffle=True)
-    test_loader = DataLoader(Subset(mnist_test, range(0, 240)), batch_size=20, shuffle=True)
+    train_loader = DataLoader(Subset(mnist_train, range(0, 80)), batch_size=20, shuffle=True)
+    test_loader = DataLoader(Subset(mnist_test, range(0, 20)), batch_size=20, shuffle=True)
 
-    model = compound_model(g, input_packet).to("cuda")
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+    model = compound_model(g, input_packet).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     loss_function = torch.nn.CrossEntropyLoss()
 
     initial_weights = g.blocks["slm"].params["weights"]._value.clone().detach().cpu().numpy()
@@ -213,7 +224,7 @@ if __name__ == "__main__":
 
     accumulation_steps = 1
     print("Starting Training")
-    total_epochs = 100
+    total_epochs = 1
 
     train_losses = []
     test_losses = []
@@ -230,8 +241,8 @@ if __name__ == "__main__":
 
         for step, (train_images, train_labels) in enumerate(train_loader):
             # Move the data to the GPU
-            train_images = train_images.to("cuda")
-            train_labels = train_labels.to("cuda")
+            train_images = train_images.to(device)
+            train_labels = train_labels.to(device)
 
             train_packets = ImagePacket(data=img_data, value=train_images.squeeze(1))
 
@@ -254,6 +265,7 @@ if __name__ == "__main__":
             running_train_loss += train_loss.item()
 
             _, predicted = torch.max(train_outputs, 1)
+
             correct_train += (predicted == train_labels).sum().item()
             total_train += train_labels.size(0)
 
@@ -270,8 +282,8 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             for test_images, test_labels in test_loader:
-                test_images = test_images.to("cuda")
-                test_labels = test_labels.to("cuda")
+                test_images = test_images.to(device)
+                test_labels = test_labels.to(device)
 
                 test_packets = ImagePacket(data=img_data, value=test_images.squeeze(1))
 

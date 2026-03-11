@@ -354,3 +354,46 @@ class ScaleBlock(Block):
         return {
             "o": ImagePacket(data=data, value=F.interpolate(image.unsqueeze(1), scale_factor=scale, mode='bilinear', align_corners=False).squeeze(1))
         }
+
+class NormalizeBlock(Block):
+    inputs = {
+        "i": ImagePacket,
+    }
+    outputs = {
+        "o": ImagePacket,
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.params = {}
+
+    def compute(self, inputs: dict[str, Packet]) -> dict[str, Packet]:
+        i = inputs["i"]
+        image = i.value
+
+        if is_empty(image):
+            return {"o": ImagePacket(reference=i, value=EMPTY_VALUE)}
+
+        initial_min = i["min_value"].val()
+        initial_max = i["max_value"].val()
+
+
+        image_avg = torch.mean(image, dim=(-2, -1), keepdim=True)
+
+        
+
+        data = {
+            "height": i["height"],
+            "width": i["width"],
+            "min_value": RealParam(-1), # TODO not actually correct
+            "max_value": RealParam(1),
+        }
+
+        image_norm = image/image_avg - 1
+        #norm_min = torch.amin(image_norm, dim=(-2, -1), keepdim=True)
+        #norm_max = torch.amax(image_norm, dim=(-2, -1), keepdim=True)
+
+
+        return {
+            "o": ImagePacket(data=data, value=image_norm)
+        }

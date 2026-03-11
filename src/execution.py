@@ -230,7 +230,7 @@ class CyclicRegionDEQ(torch.autograd.Function):
 
         # Fixed-point solve for implicit gradient
         v = grad_z_star
-        for _ in range(50):             # TODO this should probably be dynamic to convergence, not hardcoded -- also value just explodes?
+        for _ in range(50):             # TODO this should probably be dynamic to convergence, not hardcoded
             v = grad_z_star + Jt_v(v)
 
         # Parameter gradients

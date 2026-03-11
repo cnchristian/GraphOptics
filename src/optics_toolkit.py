@@ -156,11 +156,16 @@ class SLMBlock(Block):
     outputs = {
         "o": FieldPacket,
     }
+
     # TODO need to have the requirements written here somehow
     #  and some check to make sure the user has specified them before computing
 
     def __init__(self):
         super().__init__()
+        #self.requirements = {
+        #    "height": EMPTY_VALUE,
+        #    "width": EMPTY_VALUE
+        #}
         self.params = {
             "weights": RealParam(1),
             "biases": RealParam(0),
